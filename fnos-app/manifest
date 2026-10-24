@@ -1,5 +1,5 @@
 appname               = maayys-fnos
-version               = 1.0.4
+version               = 1.0.5
 display_name          = MaaYYs
 desc                  = 阴阳师自动化（MaaFramework + MXU Web 控制台），在浏览器里配置任务、看实时日志与截图
 platform              = x86
@@ -14,4 +14,4 @@ ctl_stop              = true
 os_min_version        = 1.1.3100
 service_port          = 12701
 checkport             = false
-changelog             = 1.0.4: 体积优化，功能不变 —— 镜像 3.01GB→1.62GB，安装包 1.3GB→584MB。两处纯浪费：apt 的 .deb 缓存 343MB（apt-get clean 与 install 写在同一层，跨层删等于没删）；上游 tar.gz 被 COPY 进层 265MB（改用 BuildKit bind mount 喂给 tar，不落层）。 1.0.3: 改为直连模式 —— 实测前端把 API/WS 地址硬编码成 hostname:webServerPort（默认 12701），天然只能跑在"独立端口 + 根路径"上，走网关前缀永远够不着后端。现在图标直接用 http://<NAS>:12701/（宿主机 12701 → 容器 18000 → MXU），同源、WebSocket 原生可用。代价：不走网关鉴权，仅限局域网。 1.0.2: 修复界面能打开但立刻提示"与后端连接断开" —— MXU 的 WebSocket 握手会校验 Origin 的 authority 必须等于 Host，而 nginx 的 $host 会丢掉端口，导致永远不相等、握手 403。改为转发带端口的 Host 并让 Origin 与其同源。 1.0.1: 修复打开白屏。 1.0.0: 首个版本。
+changelog             = 修复连不上 redroid —— MXU 的设备列表来自 Toolkit::find_adb_devices()，只列**已连接**的设备，不扫描网段，所以界面点刷新永远是空的。容器现在启动时自动 adb connect 并保持重连（45s 一次）。目标地址优先级：环境变量 MAAYYS_ADB_TARGETS > /data/adb-targets.txt > 网桥网关:5555。 1.0.4: 体积优化，功能不变 —— 镜像 3.01GB→1.62GB，安装包 1.3GB→584MB。两处纯浪费：apt 的 .deb 缓存 343MB（apt-get clean 与 install 写在同一层，跨层删等于没删）；上游 tar.gz 被 COPY 进层 265MB（改用 BuildKit bind mount 喂给 tar，不落层）。 1.0.3: 改为直连模式 —— 实测前端把 API/WS 地址硬编码成 hostname:webServerPort（默认 12701），天然只能跑在"独立端口 + 根路径"上，走网关前缀永远够不着后端。现在图标直接用 http://<NAS>:12701/（宿主机 12701 → 容器 18000 → MXU），同源、WebSocket 原生可用。代价：不走网关鉴权，仅限局域网。 1.0.2: 修复界面能打开但立刻提示"与后端连接断开" —— MXU 的 WebSocket 握手会校验 Origin 的 authority 必须等于 Host，而 nginx 的 $host 会丢掉端口，导致永远不相等、握手 403。改为转发带端口的 Host 并让 Origin 与其同源。 1.0.1: 修复打开白屏。 1.0.0: 首个版本。

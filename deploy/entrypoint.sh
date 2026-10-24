@@ -115,6 +115,45 @@ wait_web() {
     return 1
 }
 
+# ---------------------------------------------------------------- ADB 预连接
+# MXU 的设备列表来自 MaaFramework 的 Toolkit::find_adb_devices()，它**只列已连接的设备**，
+# 不会主动扫描网段。容器里没有 USB、也没有预连，所以界面点"刷新"永远是空的。
+# 解决方式：容器启动时先把目标 adb connect 上，并保持重连（redroid 重启会掉线）。
+#
+# 目标地址来源，优先级从高到低：
+#   1. 环境变量 MAAYYS_ADB_TARGETS（逗号或空格分隔，如 "192.168.1.15:5555"）
+#   2. 数据文件 /data/adb-targets.txt（一行一个，# 开头为注释）
+#   3. 默认：本容器所在网桥的网关 + :5555 —— 对应"redroid 把 5555 发布到宿主机"的常见接法
+adb_targets() {
+    if [ -n "${MAAYYS_ADB_TARGETS:-}" ]; then
+        printf '%s' "${MAAYYS_ADB_TARGETS}" | tr ', ' '\n\n' | grep -v '^$'
+        return 0
+    fi
+    if [ -f /data/adb-targets.txt ]; then
+        grep -vE '^[[:space:]]*(#|$)' /data/adb-targets.txt
+        return 0
+    fi
+    local gw
+    gw="$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')"
+    [ -n "${gw}" ] && echo "${gw}:5555"
+}
+
+adb_keepalive() {
+    local target
+    # 等 MXU 起来再动 adb，避免两边同时拉起 adb server 抢 5037
+    sleep 20
+    while true; do
+        for target in $(adb_targets); do
+            if ! adb devices 2>/dev/null | grep -q "^${target}[[:space:]]"; then
+                if adb connect "${target}" 2>&1 | grep -qi "connected"; then
+                    log "adb 已连接：${target}"
+                fi
+            fi
+        done
+        sleep 45
+    done
+}
+
 # ---------------------------------------------------------------- 可选 VNC
 start_vnc() {
     [ "${VNC_ENABLED}" = "1" ] || return 0
@@ -235,6 +274,11 @@ main() {
 
     start_vnc
     start_nginx
+
+    # 后台把 adb 目标连上并保持。MXU 只列已连接设备，没有这一步界面永远空白。
+    adb_keepalive &
+    ADB_KEEPALIVE_PID=$!
+    log "ADB 预连接已启动（目标：$(adb_targets | tr '\n' ' ')）"
 
     # 守护：mxu 挂了先重启，连续退出就交出容器
     local restarts=0 code

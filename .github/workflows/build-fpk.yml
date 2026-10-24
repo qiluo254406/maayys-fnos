@@ -71,14 +71,20 @@ jobs:
           echo "version=$want" >> "$GITHUB_OUTPUT"
           echo "上游版本：$want"
 
-      - name: 已构建过则跳过
+      # 跳过的判定要区分触发方式：
+      #   schedule（每天定时）—— 该上游版本已有 Release 就跳过，避免空跑
+      #   push / dispatch    —— 代码变了就得重建，否则改完 bug 永远发不出去
+      - name: 是否跳过构建
         id: gate
         run: |
           tag="${{ steps.ver.outputs.upstream }}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag 已存在，跳过构建"
+          exists=0
+          gh release view "$tag" >/dev/null 2>&1 && exists=1
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$exists" = "1" ]; then
+            echo "定时检查：Release $tag 已存在，跳过"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
+            echo "需要构建（触发方式=${{ github.event_name }}，已有 Release=$exists）"
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
         env:
@@ -153,6 +159,14 @@ jobs:
           name: fpk-${{ steps.ver.outputs.upstream }}
           path: dist/*.fpk
           retention-days: 90
+
+      # 同一个上游版本会反复发布（我们自己修 bug），所以先删掉旧的再发，
+      # 否则同名资产会冲突；删完丢掉 tag，让它重新指向这次构建的提交。
+      - name: 清理同 tag 的旧发布
+        if: steps.gate.outputs.skip == 'false'
+        run: gh release delete "${{ steps.ver.outputs.upstream }}" --yes --cleanup-tag || echo "没有旧发布，继续"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 发布 Release
         if: steps.gate.outputs.skip == 'false'

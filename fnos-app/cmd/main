@@ -373,6 +373,10 @@ start_process() {
         -e TZ=Asia/Shanghai \
         -e SCREEN_GEOMETRY=1280x800x24 \
         -e MAAYYS_VNC="${MAAYYS_VNC}" \
+        # MXU 的设备列表只列已连接的 adb 设备，不会扫描网段；
+        # 容器里启动时按这个列表自动 connect。留空则用 /data/adb-targets.txt，
+        # 再没有就用网桥网关的 5555（对应 redroid 把端口发布到宿主机）。
+        -e MAAYYS_ADB_TARGETS="${MAAYYS_ADB_TARGETS:-}" \
         -e "GATEWAY_OWNER=${GATEWAY_OWNER}" \
         -v "${DATA_DIR}:/data" \
         -v "${GATEWAY_DIR}:/gw" \

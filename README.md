@@ -127,8 +127,16 @@ MaaYYs / MaaFramework / MXU 各自遵循其原许可证，使用前请自行阅�
 
 ## 用起来
 
-1. **连安卓端**：进 MXU 界面 → 设备 → 手动填 ADB 地址，例如 `<NAS_IP>:5555`（redroid 要把 5555 映射到宿主）。
-   容器里的 adb 能连局域网，不需要 USB 透传。
+1. **连安卓端**：容器启动时会自动 `adb connect` 并保持重连，进 MXU 后点「设备」→ 刷新即可看到。
+
+   > MXU 的设备列表来自 `Toolkit::find_adb_devices()`，**只列已连接的设备、不扫描网段**，
+   > 而且界面上没有填地址的地方 —— 所以连接由容器负责（1.0.6 起）。目标地址按优先级取：
+   >
+   > 1. 环境变量 `MAAYYS_ADB_TARGETS`（逗号分隔，多个目标）
+   > 2. 文件 `maayys-data/adb-targets.txt`，一行一个地址，`#` 开头为注释
+   > 3. 默认：容器网桥网关的 `5555`（对应「redroid 把 5555 发布到宿主机」的常见接法，一般开箱即用）
+   >
+   > 自己核对：`sudo docker exec -it maayys-fnos adb devices -l`，能看到 `<IP>:5555  device` 就说明连上了。
 2. **选区服**：脚本右上角按自己区服改（官服 / B 站服 / 各渠道服）。分辨率 16:9、建议 1280×720，模拟器常态横屏。
 3. **配任务**：日常奖励、御魂、结界突破、寮三十……按需勾。
 4. **点运行**，回浏览器主页看日志和截图。
@@ -237,7 +245,8 @@ tail -20 /vol2/@appdata/maayys-fnos/auto-update.log
 | 打开图标是空白页 | 先看 `maayys-data/logs/nginx-error.log`，再看 mxu.log |
 | 页面能开但提示"与后端连接断开" | 页面端口和前端认知的 `webServerPort` 不一致。别加反代、别改端口，必须用 `:12701` |
 | 应用中心报"端口已被占用" | 宿主机 12701 被占了。前端硬编码这个端口，只能腾出来，不能换 |
-| 连不上安卓 | `sudo docker exec -it maayys-fnos adb connect <IP>:5555`，看容器内网络是否通 |
+| 连不上安卓 / 设备列表刷新不出来 | 先 `sudo docker exec -it maayys-fnos adb devices -l`。空的话手动 `adb connect <IP>:5555` 试；能连上但重启又掉，就把地址写进 `maayys-data/adb-targets.txt`（1.0.6 起容器会自动重连） |
+| 填了 `127.0.0.1:5555` 连不上 | 在容器里 `127.0.0.1` 是容器自己。要用宿主机地址：`<NAS_IP>:5555` 或网桥网关 `172.17.0.1:5555` |
 
 **逃生通道**：如果 MXU 的 Web 界面彻底打不开（比如你把它关掉了），可以开一个 noVNC 桌面进去救：
 
