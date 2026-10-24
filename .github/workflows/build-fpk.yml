@@ -34,6 +34,9 @@ on:
 
 permissions:
   contents: write
+  # 失败时开 issue 提醒用的。少了这条会报
+  # GraphQL: Resource not accessible by integration (createIssue)
+  issues: write
 
 concurrency:
   group: build-fpk

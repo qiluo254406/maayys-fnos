@@ -199,31 +199,55 @@ if [ "${DO_SMOKE}" = "1" ]; then
     docker rm -f maayys-smoke >/dev/null 2>&1 || true
     # 深度冒烟。教训：这几次事故里两次是「heartbeat 正常但页面/WS 是坏的」——
     # 白屏 = 首页 200 但 assets 404；断连 = WS 握手 403。只测 heartbeat 一次都拦不住。
+    #
+    # 另一个教训（run #4）：MXU 刚启动的几秒里连接可能被重置，heartbeat 通了 1 秒后
+    # GET / 直接 000。所以每项带重试（5 次、间隔 3s），并用 -sS 留下 curl 的错误原文，
+    # 失败时能分清是超时、拒绝连接还是状态码不对。
     base="http://127.0.0.1:18000"
 
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${base}/" || true)"
-    [ "${code}" = "200" ] || fail "冒烟失败：GET / 返回 ${code}（期望 200）"
+    smoke_200() {
+        local url="$1" name="$2" i code=000 err
+        err="$(mktemp)"
+        for i in 1 2 3 4 5; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 "$url" 2>"$err" || true)"
+            if [ "${code}" = "200" ]; then
+                rm -f "$err"
+                echo "    ${name} -> 200"
+                return 0
+            fi
+            sleep 3
+        done
+        echo "    curl 报错：$(tail -1 "$err" 2>/dev/null)"
+        rm -f "$err"
+        fail "冒烟失败：${name} 最后返回 ${code}（期望 200），已重试 5 次"
+    }
+
+    smoke_ws() {
+        local i hs="(空)"
+        for i in 1 2 3 4 5; do
+            hs="$(curl -s -i --max-time 5 \
+                -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+                -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+                -H "Origin: ${base}" \
+                "${base}/api/ws" 2>/dev/null | head -1 || true)"
+            case "${hs}" in
+                *101*) echo "    WS 握手 -> 101"; return 0 ;;
+            esac
+            sleep 3
+        done
+        fail "冒烟失败：WS 握手返回「${hs}」（期望 101），已重试 5 次"
+    }
+
+    smoke_200 "${base}/" "GET /"
 
     js="$(curl -s --max-time 5 "${base}/" 2>/dev/null | grep -oE '/assets/index-[^"]+\.js' | head -1 || true)"
     [ -n "${js}" ] || fail "冒烟失败：首页里找不到前端入口（/assets/index-*.js）"
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${base}${js}" || true)"
-    [ "${code}" = "200" ] || fail "冒烟失败：${js} 返回 ${code}（期望 200）—— 前端资源断链就是白屏"
+    smoke_200 "${base}${js}" "前端资源"
 
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${base}/api/interface" || true)"
-    [ "${code}" = "200" ] || fail "冒烟失败：/api/interface 返回 ${code}（期望 200）"
+    smoke_200 "${base}/api/interface" "接口"
 
-    # WS 握手成功后连接会一直挂着，靠 --max-time 断开；要的只是第一行的状态码
-    hs="$(curl -s -i --max-time 5 \
-        -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
-        -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-        -H "Origin: ${base}" \
-        "${base}/api/ws" 2>/dev/null | head -1 || true)"
-    case "${hs}" in
-        *101*) : ;;
-        *) fail "冒烟失败：WS 握手返回「${hs}」（期望 101）—— 装上会提示「与后端连接断开」" ;;
-    esac
+    smoke_ws
 
-    echo "    深度冒烟通过：/ 200、前端资源 200、接口 200、WS 101"
     echo "    冒烟通过"
 else
     log "[5/6] 跳过冒烟测试（--no-smoke）"
