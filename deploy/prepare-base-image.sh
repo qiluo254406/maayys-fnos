@@ -7,8 +7,8 @@
 #
 # 用法：
 #   bash deploy/prepare-base-image.sh              # 默认阿里云 + 官方 cdimage
-#   BASE_URL=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-base/releases/24.04/release \
-#     bash deploy/prepare-base-image.sh
+#   BASE_URL=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-base/.../release bash deploy/prepare-base-image.sh
+#   （上面是同一个命令，写成一行免得注释里的反斜杠把下一行吞掉）
 #
 # 完成后 `docker images ubuntu` 里会有 24.04，`docker build` 的 FROM 直接用本地这份。
 

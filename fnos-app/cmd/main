@@ -195,9 +195,17 @@ ensure_image() {
         return 0
     fi
 
+    # 镜像 ID 与期望不一致时，理论上该删掉重载。
+    # 但先确认真有离线包可重载 —— 否则删完就只能干瞪眼，应用彻底起不来。
+    # 宁可带着旧镜像先跑起来，也不能把唯一的那份删了。
     if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-        log_msg "Removing stale image ${IMAGE} ..."
-        docker rmi -f "${IMAGE}" >> "${LOG_FILE}" 2>&1 || true
+        if [ -f "${IMAGE_TGZ}" ] || [ -f "${IMAGE_TAR}" ]; then
+            log_msg "Removing stale image ${IMAGE} ..."
+            docker rmi -f "${IMAGE}" >> "${LOG_FILE}" 2>&1 || true
+        else
+            log_msg "WARN: 镜像与期望 ID 不一致，但没有离线包可重载，保留现有镜像继续启动。"
+            return 0
+        fi
     fi
 
     if [ -f "${IMAGE_TGZ}" ]; then
@@ -365,6 +373,11 @@ start_process() {
     #         正确转发给 entrypoint（优雅停机的链路从这里开始）。
     # --shm-size：WebKitGTK 默认 64MB /dev/shm 会崩。
     # --restart unless-stopped：容器异常退出自愈；显式 docker stop 不会被拉起。
+    # MXU 的设备列表只列「已连接」的 adb 设备、不扫描网段，容器启动时按这个列表自动 connect。
+    # 留空则读 /data/adb-targets.txt，再没有就用网桥网关的 5555。
+    #
+    # ⚠️ 注释只能写在这里。夹在下面这串 `\` 续行中间会把后续参数变成一条新命令
+    #    （1.0.6 就是这么挂的：docker run 根本没拿到镜像名，应用起不来）。
     docker run -d --name "${CONTAINER}" \
         --restart unless-stopped \
         --init \
@@ -373,9 +386,6 @@ start_process() {
         -e TZ=Asia/Shanghai \
         -e SCREEN_GEOMETRY=1280x800x24 \
         -e MAAYYS_VNC="${MAAYYS_VNC}" \
-        # MXU 的设备列表只列已连接的 adb 设备，不会扫描网段；
-        # 容器里启动时按这个列表自动 connect。留空则用 /data/adb-targets.txt，
-        # 再没有就用网桥网关的 5555（对应 redroid 把端口发布到宿主机）。
         -e MAAYYS_ADB_TARGETS="${MAAYYS_ADB_TARGETS:-}" \
         -e "GATEWAY_OWNER=${GATEWAY_OWNER}" \
         -v "${DATA_DIR}:/data" \

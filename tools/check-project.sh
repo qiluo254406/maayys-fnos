@@ -25,6 +25,28 @@ for f in "${ROOT}"/deploy/*.sh "${APP}"/cmd/*; do
     fi
 done
 
+# bash -n 只看语法，看不出「注释插进了 \ 续行」这类坑 ——
+# 它会让续行在注释处断掉，后面的参数变成一条新命令。
+# 1.0.6 就是因此在 NAS 上起不来：docker run 没拿到镜像名。
+echo "[1b] 续行里没有夹注释"
+CONT_OUT="$(
+    for f in "${APP}"/cmd/* "${ROOT}"/deploy/*.sh; do
+        [ -f "$f" ] || continue
+        awk '
+            prev ~ /\\[[:space:]]*$/ && $0 ~ /^[[:space:]]*#/ {
+                printf "%s:%d\n", FILENAME, FNR
+            }
+            { prev = $0 }
+        ' "$f"
+    done
+)"
+if [ -z "${CONT_OUT}" ]; then
+    ok "没有注释夹在续行中"
+else
+    bad "有注释夹在 \\ 续行中，续行会在此断开、后续参数变成新命令"
+    printf '%s\n' "${CONT_OUT}" | sed 's/^/       /'
+fi
+
 echo "[2] manifest 必填字段"
 for key in appname version display_name platform source maintainer distributor \
            desktop_uidir desktop_applaunchname ctl_stop os_min_version; do
