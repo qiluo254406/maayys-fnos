@@ -20,6 +20,14 @@ on:
         description: '上游版本（留空 = latest）'
         required: false
         default: 'latest'
+  # 改了外壳代码就自动跑一次，省得手动点。
+  # 重复构建不会发生：下面的 gate 步骤发现同上游版本的 Release 已存在就直接跳过。
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/**'
+      - 'fnos-app/**'
+      - '.github/workflows/build-fpk.yml'
   schedule:
     # 每天 19:00 UTC = 北京时间 03:00，避开白天
     - cron: '0 19 * * *'
