@@ -1,0 +1,13 @@
+{
+    ".url": {
+        "maayys-fnos.Application": {
+            "title": "MaaYYs",
+            "icon": "images/icon_{0}.png",
+            "type": "url",
+            "protocol": "http",
+            "port": "12701",
+            "url": "/",
+            "allUsers": false
+        }
+    }
+}

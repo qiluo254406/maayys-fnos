@@ -1,0 +1,425 @@
+#!/bin/bash
+# MaaYYs on 飞牛 —— 套壳：用 Docker 拉起 MXU Web 控制台
+# 依赖：镜像 maayys-fnos:local（由离线安装包内置导入）
+# 说明：只做镜像/容器生命周期管理，不碰应用内部状态
+#
+# 与 MAA-FnOS 那份骨架的主要差异（照抄会踩坑的地方）：
+#   1. MXU 没有可用的 HTTP「停任务」接口，优雅停机只能靠 docker stop 的 SIGTERM
+#      转给 entrypoint（entrypoint 再转给 mxu，给它 10s 存配置）。正在跑的任务链
+#      会中断，这是 MXU 的设计决定的，不是这里偷懒。
+#   2. 健康检查打 /api/heartbeat（nginx 转发到 MXU），而不是 nginx 自己的 /healthz ——
+#      后者只能证明外壳活着，证明不了应用活着。
+#   3. 不需要 redroid 状态代理：MXU 没有「检查容器」这类功能，不留多余权限面。
+#   4. 需要 --shm-size：WebKitGTK 在 64MB 的 /dev/shm 上会崩。
+
+# 直连模式的宿主机端口。
+#
+# 为什么必须是 12701：MXU 的前端把 API 与 WebSocket 地址硬编码成
+# `hostname:webServerPort`（该值默认 12701，见 src-tauri 里的 settings.webServerPort），
+# 页面自己并不知道"我是被哪个端口访问的"。所以浏览器必须**用这个端口**打开它，
+# 否则页面认为后端在别处，同源判定失败、WS 直接连不上（表现为"与后端连接断开"）。
+# 容器内 nginx 监听 18000，宿主机 12701 -> 容器 18000。
+HOST_PORT="12701"
+CONTAINER_HTTP_PORT="18000"
+
+IMAGE="maayys-fnos:local"
+CONTAINER="maayys-fnos"
+
+# 应用层不再走飞牛统一网关（原因见上面 HOST_PORT 那段）：图标直接打开
+# http://<NAS>:12701/，浏览器与 MXU 同源，WebSocket 原生可用。
+#
+# 但 unix socket 仍然保留：它是应用中心判活与「启动/停止」的通道，
+# 网关不参与业务路由，只用来回答 status。
+#
+# socket 不落在 TRIM_APPDEST 里，而是单独一个只装 socket 的目录，容器只挂这一个：
+# TRIM_APPDEST 下还有本脚本等可执行文件，把整个目录读写挂进以 root 运行的容器，
+# 等于给容器开了一条改写宿主脚本的路。
+GATEWAY_DIR="${TRIM_PKGVAR}/gateway"
+GATEWAY_SOCKET="${TRIM_APPDEST}/app.sock"
+
+# 健康探活：容器在 ≠ 服务在。
+# 容器跑着但 MXU 卡死/Web 服务没起来时，应用中心应当显示"异常"。
+HEALTH_CHECK_PATH="/api/heartbeat"
+HEALTH_TIMEOUT="3"
+# 首次启动要铺开 250MB+ 的应用文件、还要等 MXU 加载资源，宽限期给足
+HEALTH_GRACE="60"
+HEALTH_WARN_THROTTLE="60"
+HEALTH_WARN_STAMP="${TRIM_PKGVAR}/health-warn.ts"
+
+DOCKER_STOP_TIMEOUT="30"
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+
+# 应用数据目录（持久化：MXU 在 Linux 上把配置/截图/日志都写在程序目录下，
+# 所以整个程序目录都放在这个卷里，见 deploy/entrypoint.sh 的 seed_app）
+DATA_DIR="${TRIM_PKGVAR}/maayys-data"
+
+# 可选：MAAYYS_VNC=1 时容器内额外起 x11vnc + noVNC，通过 <网关>/vnc/vnc.html 访问。
+# 正常不需要，只在 MXU 自带 Web 界面出问题时当排查后路。
+MAAYYS_VNC="${MAAYYS_VNC:-0}"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+# 把错误暴露到飞牛应用中心界面
+write_user_error() {
+    echo "$1" > "${TRIM_TEMP_LOGFILE}"
+    log_msg "ERROR: $1"
+}
+
+check_docker() {
+    if ! command -v docker >/dev/null 2>&1; then
+        write_user_error "未找到 docker，请在应用中心安装 Docker 后重试。"
+        return 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        write_user_error "Docker 服务未运行，请先启动 Docker。"
+        return 1
+    fi
+    return 0
+}
+
+# ---- 镜像指纹（期望值必须来自包内，不能来自运行时残留）----
+# 只比对「同名镜像是否存在」不够：升级后旧镜像仍在，新包里的镜像永远不会被 load。
+IMAGE_ID_FILE="${TRIM_APPDEST}/maayys-image.id"
+IMAGE_TGZ="${TRIM_APPDEST}/maayys-image.tar.gz"
+IMAGE_TAR="${TRIM_APPDEST}/maayys-image.tar"
+
+is_sha256_hex() {
+    printf '%s' "$1" | grep -qE '^[0-9a-f]{64}$'
+}
+
+# 从离线镜像包里推导镜像 ID（可能多枚候选，每行一个，已去重）
+# 兼容经典 docker save（manifest.json 的 Config）与 OCI/containerd（index.json 的 digest）
+derive_image_id() {
+    local src="$1" manifest config_raw config index top d candidates=""
+    [ -f "${src}" ] || return 1
+    case "${src}" in
+        *.gz) manifest="$(gunzip -c "${src}" 2>/dev/null | tar -xO manifest.json 2>/dev/null)" ;;
+        *)    manifest="$(tar -xO manifest.json -f "${src}" 2>/dev/null)" ;;
+    esac
+    [ -n "${manifest}" ] || return 1
+
+    config_raw="$(printf '%s' "${manifest}" | tr -d '\n' \
+        | grep -oE '"Config"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
+        | sed 's/.*"Config"[[:space:]]*:[[:space:]]*"//; s/"$//')"
+    if [ -n "${config_raw}" ]; then
+        config="$(basename "${config_raw}")"
+        config="${config%.json}"
+        if is_sha256_hex "${config}"; then
+            candidates="${candidates}sha256:${config}
+"
+        fi
+
+        case "${config_raw}" in
+            */*)
+                case "${src}" in
+                    *.gz) index="$(gunzip -c "${src}" 2>/dev/null | tar -xO index.json 2>/dev/null)" ;;
+                    *)    index="$(tar -xO index.json -f "${src}" 2>/dev/null)" ;;
+                esac
+                if [ -n "${index}" ]; then
+                    top="$(printf '%s' "${index}" | tr -d '\n' \
+                        | sed 's/.*"manifests"[[:space:]]*:[[:space:]]*\[//; s/\].*//')"
+                    for d in $(printf '%s' "${top}" \
+                            | grep -oE '"digest"[[:space:]]*:[[:space:]]*"sha256:[0-9a-f]{64}"' \
+                            | sed 's/.*"sha256:/sha256:/; s/"$//'); do
+                        candidates="${candidates}${d}
+"
+                    done
+                fi
+                ;;
+        esac
+    fi
+
+    [ -n "${candidates}" ] || return 1
+    printf '%s' "${candidates}" | awk 'NF && !seen[$0]++'
+}
+
+write_expected_id() {
+    local ids
+    ids="$(derive_image_id "${IMAGE_TGZ}")" || ids="$(derive_image_id "${IMAGE_TAR}")" || ids=""
+    if [ -z "${ids}" ]; then
+        return 1
+    fi
+    printf '%s\n' "${ids}" > "${IMAGE_ID_FILE}" 2>/dev/null || true
+    log_msg "Expected image id(s) from package: $(printf '%s' "${ids}" | tr '\n' ' ')"
+    return 0
+}
+
+ensure_expected_id() {
+    [ -s "${IMAGE_ID_FILE}" ] && return 0
+    write_expected_id || {
+        log_msg "WARN: 既没有 ${IMAGE_ID_FILE}，也无法从镜像包推导，只能重新导入。"
+        return 1
+    }
+    return 0
+}
+
+expected_id_matches() {
+    local current want
+    current="$(printf '%s' "$1" | tr -d '[:space:]')"
+    [ -n "${current}" ] || return 1
+    [ -s "${IMAGE_ID_FILE}" ] || return 1
+    while IFS= read -r want; do
+        want="$(printf '%s' "${want}" | tr -d '[:space:]')"
+        [ -n "${want}" ] || continue
+        if [ "${current}" = "${want}" ] || [ "${current#sha256:}" = "${want#sha256:}" ]; then
+            return 0
+        fi
+    done < "${IMAGE_ID_FILE}"
+    return 1
+}
+
+image_ready() {
+    docker image inspect "${IMAGE}" >/dev/null 2>&1 || return 1
+    ensure_expected_id || return 1
+    local current
+    current="$(docker image inspect --format '{{.Id}}' "${IMAGE}" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "${current}" ] || return 1
+    if expected_id_matches "${current}"; then
+        return 0
+    fi
+    write_expected_id || true
+    if expected_id_matches "${current}"; then
+        log_msg "Image id refreshed from package (${current})."
+        return 0
+    fi
+    log_msg "Image id mismatch (have=${current}) -> will reload."
+    return 1
+}
+
+ensure_image() {
+    if image_ready; then
+        return 0
+    fi
+
+    if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+        log_msg "Removing stale image ${IMAGE} ..."
+        docker rmi -f "${IMAGE}" >> "${LOG_FILE}" 2>&1 || true
+    fi
+
+    if [ -f "${IMAGE_TGZ}" ]; then
+        local tmp_tar="${TRIM_PKGVAR}/maayys-image.tar"
+        log_msg "Decompressing ${IMAGE_TGZ} ..."
+        # gunzip 对「流完好、尾部多余字节」返回 2，但产物可用 —— 只看返回码会误杀好包
+        gunzip -c "${IMAGE_TGZ}" > "${tmp_tar}" 2>> "${LOG_FILE}" || true
+        if [ ! -s "${tmp_tar}" ] || ! tar -tf "${tmp_tar}" manifest.json >/dev/null 2>&1; then
+            rm -f "${tmp_tar}"
+            write_user_error "镜像解压失败，请查看日志 ${LOG_FILE}"
+            return 1
+        fi
+        log_msg "Loading image (可能需要几分钟) ..."
+        if docker load -i "${tmp_tar}" >> "${LOG_FILE}" 2>&1; then
+            rm -f "${tmp_tar}"
+            write_expected_id || true
+            log_msg "Image loaded."
+            return 0
+        fi
+        rm -f "${tmp_tar}"
+        write_user_error "镜像导入失败，请查看日志 ${LOG_FILE}"
+        return 1
+    fi
+
+    if [ -f "${IMAGE_TAR}" ]; then
+        log_msg "Loading image from ${IMAGE_TAR} ..."
+        if docker load -i "${IMAGE_TAR}" >> "${LOG_FILE}" 2>&1; then
+            write_expected_id || true
+            log_msg "Image loaded."
+            return 0
+        fi
+        write_user_error "镜像导入失败，请查看日志 ${LOG_FILE}"
+        return 1
+    fi
+
+    write_user_error "未找到镜像 ${IMAGE}，且离线包不存在。"
+    return 1
+}
+
+status_container() {
+    docker ps --filter "name=^${CONTAINER}$" --format '{{.Names}}' 2>/dev/null | grep -q "${CONTAINER}"
+}
+
+# 向应用发一个 GET。走网关 socket；用 -f，只有 2xx 才算拿到。
+api_get() {
+    local path="$1" out
+    if out="$(curl -sf --max-time "${HEALTH_TIMEOUT}" --unix-socket "${GATEWAY_SOCKET}" \
+            "http://localhost${path}" 2>/dev/null)"; then
+        printf '%s' "${out}"
+        return 0
+    fi
+    return 1
+}
+
+# 容器现在用的镜像，是不是包里的那一份。
+# 「容器在跑就直接复用」是个坑：升级装进来的新镜像已经就位，容器却还挂在旧镜像上，
+# 跑的还是旧代码，而界面上一切正常 —— 升级等于白做。
+container_image_matches() {
+    local have
+    docker image inspect "${IMAGE}" >/dev/null 2>&1 || return 1
+    ensure_expected_id || return 1
+    have="$(docker inspect --format '{{.Image}}' "${CONTAINER}" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "${have}" ] || return 1
+    expected_id_matches "${have}"
+}
+
+# 容器的端口映射，是不是我们要的那一套。
+# 只看镜像 ID 不够：1.0.3 改的是运行参数（新增 12701 端口映射），镜像内容一模一样，
+# 于是 image_matches 会说"没变化"、跳过重建，端口就永远不生效 —— 装完还是打不开。
+container_port_matches() {
+    local have
+    have="$(docker port "${CONTAINER}" "${CONTAINER_HTTP_PORT}/tcp" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "${have}" ] || return 1
+    printf '%s\n' "${have}" | grep -q ":${HOST_PORT}$"
+}
+
+container_uptime() {
+    local started secs
+    started="$(docker inspect --format '{{.State.StartedAt}}' "${CONTAINER}" 2>/dev/null)" || return 1
+    [ -n "${started}" ] || return 1
+    started="$(printf '%s' "${started}" | sed 's/\.[0-9]*//')"
+    secs="$(date -d "${started}" +%s 2>/dev/null)" || return 1
+    [ -n "${secs}" ] || return 1
+    printf '%s\n' "$(( $(date +%s) - secs ))"
+}
+
+should_log_health_warn() {
+    local now last=0
+    now="$(date +%s)"
+    if [ -f "${HEALTH_WARN_STAMP}" ]; then
+        read -r last < "${HEALTH_WARN_STAMP}" 2>/dev/null
+    fi
+    case "${last}" in ''|*[!0-9]*) last=0 ;; esac
+    if [ "${last}" -gt 0 ] && [ "$((now - last))" -lt "${HEALTH_WARN_THROTTLE}" ]; then
+        return 1
+    fi
+    printf '%s\n' "${now}" > "${HEALTH_WARN_STAMP}" 2>/dev/null || true
+    return 0
+}
+
+status() {
+    status_container || return 1
+
+    local up detail
+    if up="$(container_uptime)"; then
+        if [ "${up}" -lt "${HEALTH_GRACE}" ]; then
+            # 启动宽限期内不探活；看的是容器启动时间，不是服务就绪时间
+            return 0
+        fi
+        detail="uptime=${up}s"
+    else
+        detail="uptime=unknown, docker inspect failed"
+    fi
+
+    if api_get "${HEALTH_CHECK_PATH}" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if should_log_health_warn; then
+        log_msg "WARN: container ${CONTAINER} is running but ${GATEWAY_SOCKET} is not responding (${detail})."
+    fi
+    return 1
+}
+
+start_process() {
+    check_docker || return 1
+    ensure_image || return 1
+
+    if status_container; then
+        if container_image_matches && container_port_matches; then
+            log_msg "Container already running (image + port mapping ok)."
+            return 0
+        fi
+        # 镜像或端口映射与包里的期望不一致：拆掉重建
+        log_msg "Container config differs from package (image/port) -> recreating with ${IMAGE}."
+        docker stop --time "${DOCKER_STOP_TIMEOUT}" "${CONTAINER}" >> "${LOG_FILE}" 2>&1 || true
+        docker rm -f "${CONTAINER}" >> "${LOG_FILE}" 2>&1 || true
+    fi
+
+    docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+
+    mkdir -p "${DATA_DIR}" 2>/dev/null || true
+
+    # socket 专用目录 + 软链。
+    # socket 属主由容器内 entrypoint chown 决定（取这里是包用户），所以这个目录必须由
+    # package 用户建出来 —— docker 自动创建的挂载点属主是 root，那会让应用自己的探活
+    # 被自己挡在 0600 外面。
+    if ! mkdir -p "${GATEWAY_DIR}"; then
+        write_user_error "无法创建网关 socket 目录 ${GATEWAY_DIR}"
+        return 1
+    fi
+    GATEWAY_OWNER="$(stat -c '%u:%g' "${GATEWAY_DIR}" 2>/dev/null || true)"
+    rm -f "${GATEWAY_SOCKET}"
+    ln -s "${GATEWAY_DIR}/app.sock" "${GATEWAY_SOCKET}" 2>/dev/null || true
+
+    # 端口冲突要提前报：前端硬编码 12701，换端口等于把 UI 弄瞎，
+    # 所以这里不"自动找个空闲端口"，而是明确告诉用户谁占了。
+    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${HOST_PORT}$"; then
+        write_user_error "宿主机端口 ${HOST_PORT} 已被占用（MaaYYs 的前端硬编码该端口，不能换）。请先释放该端口再启动。"
+        return 1
+    fi
+
+    log_msg "Starting container ${CONTAINER} ..."
+    # --init：tini 当 1 号进程，回收 adb/sh 这类被遗弃的子进程，并且把 SIGTERM
+    #         正确转发给 entrypoint（优雅停机的链路从这里开始）。
+    # --shm-size：WebKitGTK 默认 64MB /dev/shm 会崩。
+    # --restart unless-stopped：容器异常退出自愈；显式 docker stop 不会被拉起。
+    docker run -d --name "${CONTAINER}" \
+        --restart unless-stopped \
+        --init \
+        --shm-size 512m \
+        -p "${HOST_PORT}:${CONTAINER_HTTP_PORT}" \
+        -e TZ=Asia/Shanghai \
+        -e SCREEN_GEOMETRY=1280x800x24 \
+        -e MAAYYS_VNC="${MAAYYS_VNC}" \
+        -e "GATEWAY_OWNER=${GATEWAY_OWNER}" \
+        -v "${DATA_DIR}:/data" \
+        -v "${GATEWAY_DIR}:/gw" \
+        "${IMAGE}" >> "${LOG_FILE}" 2>&1
+
+    sleep 3
+    if status_container; then
+        log_msg "Container started: ${CONTAINER} (gateway socket: ${GATEWAY_SOCKET})"
+        return 0
+    fi
+
+    write_user_error "MaaYYs 容器启动失败，请查看日志 ${LOG_FILE}"
+    return 1
+}
+
+stop_process() {
+    log_msg "Stopping container ${CONTAINER} ..."
+    # docker stop 发 SIGTERM → tini 转发给 entrypoint → entrypoint 再转给 mxu，
+    # 并给它 10s 保存配置。MaaFramework 没有「暂停到安全点」的接口，
+    # 正在跑的任务链会被中断，这是 MXU 的限制。
+    docker stop --time "${DOCKER_STOP_TIMEOUT}" "${CONTAINER}" >> "${LOG_FILE}" 2>&1 || true
+    docker rm -f "${CONTAINER}" >> "${LOG_FILE}" 2>&1 || true
+    rm -f "${PID_FILE}"
+    log_msg "Container stopped."
+    return 0
+}
+
+case "$1" in
+start)
+    start_process
+    ;;
+stop)
+    stop_process
+    ;;
+status)
+    if status; then
+        exit 0
+    else
+        exit 3
+    fi
+    ;;
+image-ids)
+    # 只读子命令：把包内镜像包的合法候选 ID 输出到 stdout，供安装脚本读取
+    derive_image_id "${IMAGE_TGZ}" || derive_image_id "${IMAGE_TAR}"
+    ;;
+*)
+    echo "Unknown command: $1" > "${TRIM_TEMP_LOGFILE}"
+    exit 1
+    ;;
+esac

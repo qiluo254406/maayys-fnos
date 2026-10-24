@@ -1,0 +1,162 @@
+# 由 entrypoint.sh 用 envsubst 渲染：只替换 ${GATEWAY_SOCKET} ${WEB_PORT} ${VNC_PORT} ${DEBUG_TCP_PORT}
+# nginx 自己的变量（$host、$http_upgrade…）不受影响。
+
+worker_processes 1;
+daemon on;
+# 容器本身就是边界：这里统一用 root，避免 worker 以 www-data 运行时
+# 写不了 /data/logs/（属主 root）导致 access_log 打不开、worker 起不来。
+user root;
+pid /run/nginx.pid;
+error_log /data/logs/nginx-error.log warn;
+
+events {
+    worker_connections 512;
+}
+
+http {
+    include      /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    access_log /data/logs/nginx-access.log;
+    sendfile on;
+    server_tokens off;
+
+    # 资源包/APK 上传走这个口，别设太小
+    client_max_body_size 512m;
+
+    client_body_temp_path /run/nginx-tmp/body;
+    proxy_temp_path       /run/nginx-tmp/proxy;
+    fastcgi_temp_path     /run/nginx-tmp/fastcgi;
+    uwsgi_temp_path       /run/nginx-tmp/uwsgi;
+    scgi_temp_path        /run/nginx-tmp/scgi;
+
+    # WebSocket 升级（MXU 的实时状态推送走 /api/ws）
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
+    # 转发给 MXU 的 Host：必须带端口。
+    # nginx 的 $host 会丢掉端口，而 MXU 的 WS 握手会做同源校验 ——
+    # 它要求 Origin 的 authority 严格等于 Host，见上游 src-tauri/src/web_server.rs
+    # 的 is_same_origin_ws_request()。浏览器发的是 http://nas:5666，
+    # 若我们只转发 Host: nas，就永远对不上，WS 直接 403，界面表现为"与后端连接断开"。
+    map $http_host $fwd_host {
+        default $http_host;
+        ""      $host;
+    }
+
+    server {
+        # 正式入口：飞牛统一网关按 app/ui/config 里的 gatewaySocket 找过来
+        listen unix:${GATEWAY_SOCKET};
+        # 调试入口：单机 docker run 时用，正式部署不映射到宿主机
+        listen ${DEBUG_TCP_PORT};
+
+        # 重定向保持相对路径，免得网关前缀（/app/maayys-fnos）被吃掉
+        absolute_redirect off;
+
+        # 给宿主侧探活用的轻量端点：只证明 nginx 活着，不证明 mxu 活着。
+        # 真正的健康检查打 /api/heartbeat（会转发到 MXU）。
+        location = /healthz {
+            access_log off;
+            add_header Content-Type text/plain;
+            return 200 "ok\n";
+        }
+
+        # ---------- 飞牛网关前缀 ----------
+        # 网关转发时**保留** ${APP_PREFIX} 前缀（官方契约 + 生态里几个应用都是这么处理的）。
+        # 而 MXU 的前端是 Vite 构建的：资源与接口全是绝对路径（/assets/…、/api/…、/api/ws）。
+        # 直接挂在子路径下，浏览器会去网关根上找 /assets/… → 404 → 白屏。
+        #
+        # 这里两件事一起做：
+        #   进来时剥掉前缀（让 MXU 以为自己在域名根上）
+        #   出去时把响应里的绝对路径补回前缀（HTML 的 src/href、JS 里的 /api 与动态 import）
+        # 生态先例：DeepSeek Harness 的 app/proxy.js 做的就是这一套重写。
+        location = ${APP_PREFIX} {
+            # 少了尾斜杠时相对路径会解析到上一层，必须先补斜杠
+            return 301 ${APP_PREFIX}/;
+        }
+
+        location ${APP_PREFIX}/ {
+            rewrite ^${APP_PREFIX}/(.*)$ /$1 break;
+
+            proxy_pass http://127.0.0.1:${WEB_PORT};
+            proxy_http_version 1.1;
+
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            # Host 必须带端口，且 Origin 要与之同源 —— MXU 的 WS 握手会校验这一条
+            proxy_set_header Host $fwd_host;
+            proxy_set_header Origin "http://$fwd_host";
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Prefix ${APP_PREFIX};
+
+            # sub_filter 只能改明文：上游一压缩就静默失效，必须把 Accept-Encoding 清掉
+            proxy_set_header Accept-Encoding "";
+
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            proxy_buffering off;
+
+            sub_filter_once off;
+            # text/html 是默认类型，不要再列一遍（会报 duplicate MIME type）
+            sub_filter_types application/javascript text/javascript text/css;
+
+            # HTML：入口脚本、样式、favicon
+            sub_filter '="/assets/'    '="${APP_PREFIX}/assets/';
+            sub_filter '="/vite.svg'   '="${APP_PREFIX}/vite.svg';
+
+            # JS：同源接口与 WebSocket（"/api、'/api、`/api 三种引法都要覆盖）
+            sub_filter '"/api'         '"${APP_PREFIX}/api';
+            sub_filter "'/api"         "'${APP_PREFIX}/api";
+            sub_filter '`/api'         '`${APP_PREFIX}/api';
+
+            # JS：动态 import 的资源路径
+            sub_filter '"/assets/'     '"${APP_PREFIX}/assets/';
+            sub_filter '`/assets/'     '`${APP_PREFIX}/assets/';
+
+            # JS：WebSocket 地址是模板串拼的 —— `${host}/api/ws`，前面是 } 不是引号，
+            # 上面三条引号规则都盖不住。只匹配 }/api/ws，避免碰到
+            # `http://${host}:${port}/api/interface` 那条端口探测（那条不该改写）。
+            sub_filter '}/api/ws'      '}${APP_PREFIX}/api/ws';
+
+            # CSS：字体/图片的绝对 url()
+            sub_filter 'url(/assets/'  'url(${APP_PREFIX}/assets/';
+
+            # 注意：不要给 application/json 开 sub_filter —— 那是用户数据，
+            # 万一里面正好有 "/api 字样就被改了。
+        }
+
+        # 可选逃生通道：MAAYYS_VNC=1 时才有上游，否则 502
+        location /vnc/ {
+            proxy_pass http://127.0.0.1:${VNC_PORT}/;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_set_header Host $host;
+            proxy_read_timeout 3600s;
+        }
+
+        # 直连模式（不经网关，浏览器访问 http://nas:18000/）：
+        # 路径本来就是根，不需要重写，但 Host/Origin 同样要成对，否则 WS 也 403。
+        location / {
+            proxy_pass http://127.0.0.1:${WEB_PORT};
+            proxy_http_version 1.1;
+
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_set_header Host $fwd_host;
+            proxy_set_header Origin "http://$fwd_host";
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            # 截图轮询和 WS 推送都是长连接，别让 nginx 先超时
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            proxy_buffering off;
+            proxy_request_buffering off;
+        }
+    }
+}

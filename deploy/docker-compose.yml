@@ -1,0 +1,37 @@
+# 不装 fpk 的独立 Docker 部署（调试 / 非飞牛环境）
+#
+#   先在仓库根目录跑一次 deploy/build.sh --image-only 准备好构建目录，
+#   或者手工把 MaaYYs 的 Linux 全量包与 Dockerfile 放进 build-work/，然后：
+#
+#     MAAYYS_BUILD_WORK=/abs/path/to/build-work docker compose up -d --build
+#     open http://<host>:18000
+#
+# 正式部署请走 fpk：那种方式由飞牛网关负责鉴权、不占端口。
+
+services:
+  maayys-fnos:
+    build:
+      context: ${MAAYYS_BUILD_WORK:-../build-work}
+      dockerfile: Dockerfile
+      args:
+        MAAYYS_TARBALL: ${MAAYYS_TARBALL:-MaaYYs-linux-x86_64-v3.17.11-MXU.tar.gz}
+        MAAYYS_VERSION: ${MAAYYS_VERSION:-v3.17.11}
+    image: maayys-fnos:local
+    container_name: maayys-fnos
+    restart: unless-stopped
+    init: true
+    # WebKitGTK 在默认 64MB /dev/shm 上会崩
+    shm_size: 512m
+    ports:
+      # 这里映射的是 nginx 的调试端口；容器内 MXU 自己只监听 127.0.0.1:12701
+      - "18000:18000"
+    environment:
+      TZ: Asia/Shanghai
+      SCREEN_GEOMETRY: 1280x800x24
+      # 1 = 额外开 noVNC 桌面（http://<host>:18000/vnc/vnc.html），排查用
+      MAAYYS_VNC: "0"
+    volumes:
+      # MXU 在 Linux 上是便携式布局，配置/截图/日志都写在程序目录下，
+      # 所以整个 /data 就是它的家，必须持久化
+      - ./data:/data
+    # adb 连模拟器走网络（<NAS_IP>:5555），不需要 USB 透传

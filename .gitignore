@@ -1,0 +1,19 @@
+# 离线镜像与构建产物：单个就 400MB+，别进版本库
+fnos-app/app/maayys-image.tar
+fnos-app/app/maayys-image.tar.gz
+fnos-app/*.fpk
+dist/
+
+# 构建工作目录（上游包、fnpack、构建上下文）
+build-work/
+
+# 独立部署时的运行期数据
+deploy/data/
+*.log
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+__pycache__/

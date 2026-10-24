@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily check for MaaYYs updates on fnOS
+
+[Timer]
+# 每天 04:30（本地时区）检查一次；开机 10 分钟后也补一次
+OnCalendar=*-*-* 04:30:00
+OnBootSec=10min
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

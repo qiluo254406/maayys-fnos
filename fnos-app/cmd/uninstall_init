@@ -1,0 +1,20 @@
+#!/bin/bash
+# 卸载应用前：停止并删除 MaaYYs 容器
+# 用户数据留在 ${TRIM_PKGVAR}/maayys-data，是否随卸载删除由飞牛的「卸载数据」选项决定
+
+LOG_FILE="${TRIM_PKGVAR}/uninstall.log"
+CONTAINER="maayys-fnos"
+
+log_msg() {
+    mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+if command -v docker >/dev/null 2>&1; then
+    log_msg "Removing container ${CONTAINER} ..."
+    docker rm -f "${CONTAINER}" >> "${LOG_FILE}" 2>&1 || true
+fi
+
+log_msg "uninstall_init done. (镜像保留，用户数据 ${TRIM_PKGVAR}/maayys-data 保留)"
+
+exit 0

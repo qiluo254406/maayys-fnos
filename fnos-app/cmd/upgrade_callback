@@ -1,0 +1,9 @@
+#!/bin/bash
+# 升级完成后立刻导入新镜像，别等到第一次启动才 load ——
+# 那样用户点「启动」会卡几分钟，还容易以为是坏了。
+# 导入逻辑与安装完全一致，直接复用，避免两份代码各自漂移。
+#
+# 注意：这里不重建容器。旧容器还挂在旧镜像上，cmd/main 的 start 会比对镜像 ID
+# 并重建（见 container_image_matches），不会出现「升级了但跑的还是旧代码」。
+
+exec bash "$(dirname "${BASH_SOURCE[0]}")/install_callback"

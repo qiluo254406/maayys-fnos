@@ -1,0 +1,168 @@
+name: build-fpk
+
+# 在 GitHub 上构建 fpk，不占本机。
+# 触发：
+#   - 每天定时查一次上游有没有新 release
+#   - 手动跑（可指定上游版本）
+#   - 上游发版时由定时任务发现并构建
+#
+# 产物：
+#   - Actions artifacts（保留 90 天）
+#   - GitHub Release（tag = upstream 版本），含：
+#       maayys-fnos_<app>_<upstream>.fpk   带版本号，存档用
+#       maayys-fnos.fpk                    固定名字，给 NAS 自动更新用
+#       latest.json                        版本 + sha256 + 大小，供 NAS 比对
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: '上游版本（留空 = latest）'
+        required: false
+        default: 'latest'
+  schedule:
+    # 每天 19:00 UTC = 北京时间 03:00，避开白天
+    - cron: '0 19 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-fpk
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      # 构建要 ~4GB（上游包 254MB + 镜像 1.6GB + 导出 600MB + fpk 600MB），
+      # runner 默认只有十几 GB，先清掉预装的大块头更稳。
+      - name: 腾出磁盘
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: 解析上游版本
+        id: ver
+        run: |
+          set -eu
+          want="${{ github.event.inputs.upstream_version }}"
+          [ -z "$want" ] && want=latest
+          if [ "$want" = latest ]; then
+            want="$(curl -fsSL --retry 3 "https://api.github.com/repos/TanyaShue/MaaYYs/releases/latest" \
+              | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+          fi
+          [ -n "$want" ] || { echo "取不到上游版本"; exit 1; }
+          echo "upstream=$want" >> "$GITHUB_OUTPUT"
+          # 同一上游版本已经发过就不重复构建（除非手动强推）
+          echo "version=$want" >> "$GITHUB_OUTPUT"
+          echo "上游版本：$want"
+
+      - name: 已构建过则跳过
+        id: gate
+        run: |
+          tag="${{ steps.ver.outputs.upstream }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag 已存在，跳过构建"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # fnOS 对同版本号的 fpk 不给覆盖安装，所以每次发布都必须让 version 严格递增。
+      # 人力只维护 major.minor，patch 交给这里自增。
+      - name: 自增应用版本号
+        if: steps.gate.outputs.skip == 'false'
+        run: |
+          set -eu
+          cur="$(grep -E '^version[[:space:]]*=' fnos-app/manifest | head -1 | cut -d= -f2 | tr -d ' ')"
+          new="$(echo "$cur" | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')"
+          sed -i "s/^version[[:space:]]*=.*/version               = ${new}/" fnos-app/manifest
+          # changelog 里含中文与特殊符号，用 python 改行比 sed 拼接安全
+          python3 - "$new" "${{ steps.ver.outputs.upstream }}" <<'PY'
+          import re, sys
+          new, up = sys.argv[1], sys.argv[2]
+          p = "fnos-app/manifest"
+          lines = open(p, encoding="utf-8").read().splitlines()
+          for i, ln in enumerate(lines):
+              if ln.startswith("changelog"):
+                  old = ln.split("=", 1)[1].strip()
+                  lines[i] = f"changelog             = {new}: 由 CI 按上游 {up} 自动构建。 {old}"
+                  break
+          open(p, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+          print(f"changelog 已更新（{new}）")
+          PY
+          echo "APP_VER=$new" >> "$GITHUB_ENV"
+          echo "应用版本：$cur -> $new"
+
+      - name: 构建（含冒烟）
+        if: steps.gate.outputs.skip == 'false'
+        run: |
+          # runner 在国外，用官方 apt 源；国内构建机才用阿里云（build.sh 默认）
+          bash deploy/build.sh \
+            --version "${{ steps.ver.outputs.upstream }}" \
+            --work "$PWD/build-work" \
+            --apt-mirror ""
+
+      - name: 整理产物
+        if: steps.gate.outputs.skip == 'false'
+        id: pack
+        run: |
+          set -eu
+          fpk="$(ls -1 dist/*.fpk | head -1)"
+          base="$(basename "$fpk")"
+          cp -f "$fpk" dist/maayys-fnos.fpk          # 固定名字，NAS 认这个
+          sha="$(sha256sum "$fpk" | cut -d' ' -f1)"
+          size="$(stat -c %s "$fpk")"
+          cat > dist/latest.json <<EOF
+          {
+            "app_version": "${APP_VER}",
+            "upstream_version": "${{ steps.ver.outputs.upstream }}",
+            "fpk": "${base}",
+            "size_bytes": ${size},
+            "sha256": "${sha}",
+            "built_at": "$(date -Iseconds)",
+            "repo": "${GITHUB_REPOSITORY}"
+          }
+          EOF
+          cat dist/latest.json
+          {
+            echo "base=$base"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 上传 artifact
+        if: steps.gate.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-${{ steps.ver.outputs.upstream }}
+          path: dist/*.fpk
+          retention-days: 90
+
+      - name: 发布 Release
+        if: steps.gate.outputs.skip == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.upstream }}
+          name: MaaYYs ${{ steps.ver.outputs.upstream }} for fnOS
+          body: |
+            上游 MaaYYs ${{ steps.ver.outputs.upstream }}，应用版本 ${{ env.APP_VER }}。
+
+            - `maayys-fnos.fpk` 固定名字，供 NAS 自动更新
+            - `${{ steps.pack.outputs.base }}` 带版本号的存档
+            - `latest.json` 供脚本比对版本
+
+            sha256: `${{ steps.pack.outputs.sha }}`
+          files: |
+            dist/maayys-fnos.fpk
+            dist/${{ steps.pack.outputs.base }}
+            dist/latest.json
+          draft: false
+          prerelease: false

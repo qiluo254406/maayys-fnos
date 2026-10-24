@@ -1,0 +1,16 @@
+[Unit]
+Description=MaaYYs on fnOS auto update (checks GitHub release, installs newer fpk)
+Documentation=https://github.com/qiluo/maayys-fnos
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 脚本放在哪就改成哪；变量写在这里，不用改脚本
+Environment=MAAYYS_REPO=qiluo/maayys-fnos
+Environment=MAAYYS_VOLUME=2
+# NAS 本机有代理时打开（例如 Clash 监听 7890）；没有就留空
+Environment=MAAYYS_UPDATE_PROXY=http://127.0.0.1:7890
+ExecStart=/bin/bash /vol2/@appdata/maayys-fnos/nas-auto-update.sh
+TimeoutStartSec=3600
+Nice=10
