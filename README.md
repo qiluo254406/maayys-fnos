@@ -1,12 +1,54 @@
 # MaaYYs on 飞牛 fnOS
 
-把 [MaaYYs](https://github.com/TanyaShue/MaaYYs)（阴阳师自动化，MaaFramework + MXU）搬进飞牛 NAS，
-做成可以直接在应用中心安装的 fpk。装完桌面多一个 **MaaYYs** 图标，点开就是完整控制台：
-配任务、看实时日志、看截图，手机浏览器也能用。
+把 [MaaYYs](https://github.com/TanyaShue/MaaYYs)（阴阳师自动化）打包成飞牛 NAS 上**一键安装的 fpk**：
+桌面点一下就是完整 Web 控制台，配任务、看实时日志与截图，手机浏览器也能用。
+
+| | |
+|---|---|
+| **项目地址** | https://github.com/qiluo254406/maayys-fnos |
+| **安装包** | [Releases](https://github.com/qiluo254406/maayys-fnos/releases)（584MB，内置离线镜像，装时不联网） |
+| **上游版本** | MaaYYs v3.17.11（随上游更新，见 [更新](#更新)） |
+| **平台** | 飞牛 fnOS 1.1.3100+ / x86_64 / 需要 Docker |
+
+## 写在前面：这个项目是 AI 写的
+
+本仓库的打包工程 —— Dockerfile、nginx 配置、`cmd/` 生命周期脚本、CI 工作流、自动更新脚本 ——
+由 AI（WorkBuddy / Claude）在与使用者对话中生成，使用者负责提需求、在真机上实测与验收。
+
+需要说清楚的几点：
+
+- **它不是上游 MaaYYs 的一部分**，也不代表 MaaYYs、MaaFramework 或飞牛官方的立场。
+- 因为主要代码是 AI 写的，所以注释写的是**"为什么这么做"**，而不是"做了什么"。
+  比如 `cmd/main` 里为什么只比对镜像 ID 不够、`nginx.conf.template` 里为什么 `$host` 会丢端口。
+- 走过的弯路都留在 [`docs/构建指南.md`](docs/构建指南.md) 里，包括三次失败的白屏/断连。
+- 没有在真实设备上验证过的部分会明确标注，不假装验证过。
+
+## 它依赖谁、参考了谁
+
+| 类别 | 项目 | 说明 |
+|---|---|---|
+| **运行时本体**（打进包里） | [MaaYYs](https://github.com/TanyaShue/MaaYYs) | 阴阳师自动化主程序，构建时从上游 Release 下载全量包 |
+| 运行时依赖 | [MaaFramework](https://github.com/MaaXYZ/MaaFramework) | 自动化框架，随 MaaYYs 全量包一起提供 |
+| 运行时依赖 | [MXU](https://github.com/MaaXYZ/MXU) | Tauri 桌面端 + 内置 axum Web 控制台（浏览器里看到的就是它） |
+| 打包工具 | [fnpack](https://developer.fnnas.com/) | 飞牛官方 fpk 打包工具，构建时自动下载 |
+| **参考项目** | [MAA-FnOS](https://github.com/mydanyi/MAA-FnOS) | 本项目的 `fnos-app/` 目录约定、manifest / ui / cmd 的写法参考了它的[构建指南](https://github.com/mydanyi/MAA-FnOS/blob/main/docs/%E6%9E%84%E5%BB%BA%E6%8C%87%E5%8D%97.md) |
+
+> 参考不等于照搬。MAA-FnOS 是「MAA + MAA-WEB-CONTROL」的方案，本项目是「MaaYYs 自带 MXU Web」，
+> 应用层完全重写 —— 差异逐条列在下面的对比表里。特别提醒：它那份指南的「换 Web 前端源码」
+> 和「镜像里 listen socket」两步，套到 MXU 上会直接白屏。
+
+## 许可证与免责
+
+本仓库只包含**打包脚本与配置**，不含游戏内容，也不分发 MaaYYs 的二进制
+（构建时从上游 Release 下载，装进镜像的只是运行时副本）。
+MaaYYs / MaaFramework / MXU 各自遵循其原许可证，使用前请自行阅读。
+
+自动化工具可能违反游戏用户协议，账号风险自负。本项目不用于代练或账号交易。
 
 ## 为什么不是照抄 MAA-FnOS 的构建指南
 
 那份指南的骨架很好用（本项目的 `fnos-app/` 就是照它的约定写的），但**应用层不能套**，两者的形态根本不同：
+
 
 | | MAA-FnOS | MaaYYs（本项目） |
 |---|---|---|
@@ -44,7 +86,8 @@
    git clone <this-repo> && cd maayys-fnos
    bash deploy/build.sh
    ```
-   产物在 `dist/maayys-fnos_1.0.3_v3.17.11.fpk`（**1.3GB**，内置离线镜像，安装时不用联网）。
+   产物在 `dist/maayys-fnos_1.0.5_v3.17.11.fpk`（**584MB**，内置离线镜像，安装时不用联网）。
+   也可以完全跳过本地构建，直接用 CI 出的包（见 [不想在本地构建？](#不想在本地构建云端构建--自动更新)）。
 2. 飞牛 **应用中心 → 左下角手动安装 → 从电脑上传**，选这个 fpk。
 3. 装完在应用中心启动，点桌面 **MAAYYs** 图标 —— 会在浏览器里打开 `http://<NAS>:12701/`。
 
@@ -67,7 +110,7 @@
 
 ### 体积是怎么构成的（想再瘦看这里）
 
-镜像 3.0GB / 安装包 1.3GB。1.0.3 之后做过一轮清理，去掉了两块纯浪费：
+清理前是镜像 3.0GB / 安装包 1.3GB，现在是 **1.62GB / 584MB**。去掉的是两块纯浪费：
 
 | 项 | 之前 | 处理 |
 |---|---|---|
@@ -107,7 +150,7 @@ https_proxy=http://127.0.0.1:7890 bash tools/check-update.sh
 bash deploy/build.sh --version latest
 ```
 
-产物落在 `dist/`，文件名自带版本（`maayys-fnos_1.0.4_v3.18.0.fpk`），不会覆盖旧的。
+产物落在 `dist/`，文件名自带版本（`maayys-fnos_1.0.5_v3.17.11.fpk`），不会覆盖旧的。
 
 装到 NAS：应用中心 → 手动安装 → 选新 fpk，**覆盖安装**即可。容器首次启动时
 `seed_app()` 会比对 `/opt/maayys-dist/.dist-version`：变了就刷新程序文件
@@ -118,7 +161,7 @@ bash deploy/build.sh --version latest
 
 比如改了 nginx 配置、cmd/main、端口号：
 
-1. **必须**升 `fnos-app/manifest` 里的 `version`（例如 1.0.4），并在 `changelog` 加一句。
+1. **必须**升 `fnos-app/manifest` 里的 `version`，并在 `changelog` 加一句（CI 会自动做这一步）。
    否则 fnOS 认为版本没变，不给覆盖安装。
 2. 重打：`bash deploy/build.sh --version v3.17.11`（复用已下好的上游包）。
 
