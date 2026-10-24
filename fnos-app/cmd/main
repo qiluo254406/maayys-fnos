@@ -382,6 +382,8 @@ start_process() {
         --restart unless-stopped \
         --init \
         --shm-size 512m \
+        --log-opt max-size=10m \
+        --log-opt max-file=3 \
         -p "${HOST_PORT}:${CONTAINER_HTTP_PORT}" \
         -e TZ=Asia/Shanghai \
         -e SCREEN_GEOMETRY=1280x800x24 \

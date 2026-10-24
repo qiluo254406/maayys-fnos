@@ -48,6 +48,11 @@ jobs:
       - name: 检出
         uses: actions/checkout@v4
 
+      # bash -n 拦不住的坑（比如注释插进 \ 续行导致 docker run 截断，1.0.6 就这么挂的）
+      # 靠这套语义检查在打包前拦下来，别白等 15 分钟
+      - name: 打包前自检
+        run: bash tools/check-project.sh
+
       # 构建要 ~4GB（上游包 254MB + 镜像 1.6GB + 导出 600MB + fpk 600MB），
       # runner 默认只有十几 GB，先清掉预装的大块头更稳。
       - name: 腾出磁盘
@@ -188,3 +193,22 @@ jobs:
             dist/latest.json
           draft: false
           prerelease: false
+
+      # 构建挂了不能只靠红叉：开/更 issue，GitHub 会给你发邮件通知
+      - name: 失败时开 issue 提醒
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          body="$(printf '构建失败：[%s #%s](%s/%s/actions/runs/%s)\n\n- 触发方式：`%s`\n- 提交：`%s`\n- 时间：%s' \
+            "${{ github.workflow }}" "${{ github.run_number }}" \
+            "${{ github.server_url }}" "${{ github.repository }}" "${{ github.run_id }}" \
+            "${{ github.event_name }}" "${{ github.sha }}" "$(date -u '+%F %TZ')")"
+          num="$(gh issue list --state open --search "CI 构建失败 in:title" --json number --jq '.[0].number' 2>/dev/null || true)"
+          if [ -n "${num}" ]; then
+            gh issue comment "${num}" --body "${body}"
+            echo "已评论到已有 issue #${num}"
+          else
+            gh issue create --title "CI 构建失败" --body "${body}"
+            echo "已新建 issue"
+          fi

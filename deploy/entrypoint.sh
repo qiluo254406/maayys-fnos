@@ -154,6 +154,37 @@ adb_keepalive() {
     done
 }
 
+# ---------------------------------------------------------------- 磁盘卫生
+# 三处只增不减的东西：MXU 的 debug/（截图等调试产物）、各服务日志、mxu.log（单文件持续追加）。
+# 长期跑任务的 NAS 会被这些东西吃满盘，而且不容易第一时间发现是谁吃的。
+DISK_HYGIENE_PID=0
+
+start_disk_hygiene() {
+    (
+        # 先睡一小时，避开启动高峰
+        sleep 3600
+        while :; do
+            # MXU 的截图与调试产物：留 7 天
+            find "${APP_DIR}/debug" -type f -mtime +7 -delete 2>/dev/null || true
+            find "${APP_DIR}/debug" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+            # 容器内各服务日志：留 7 天（mxu.log 单独按大小处理）
+            find "${LOG_DIR}" -type f -mtime +7 ! -name 'mxu.log' -delete 2>/dev/null || true
+            # mxu.log 持续追加，mtime 永远是新的，按大小截断（超 20MB 留尾部 5MB）
+            if [ -f "${LOG_DIR}/mxu.log" ]; then
+                size="$(stat -c '%s' "${LOG_DIR}/mxu.log" 2>/dev/null || echo 0)"
+                if [ "${size}" -gt 20971520 ]; then
+                    tail -c 5242880 "${LOG_DIR}/mxu.log" > "${LOG_DIR}/mxu.log.tmp" 2>/dev/null \
+                        && mv "${LOG_DIR}/mxu.log.tmp" "${LOG_DIR}/mxu.log" \
+                        && log "mxu.log 超过 20MB，已截断保留尾部 5MB"
+                fi
+            fi
+            sleep 3600
+        done
+    ) &
+    DISK_HYGIENE_PID=$!
+    log "磁盘清理已启动（debug 截图与服务日志保留 7 天，mxu.log 超 20MB 截断）"
+}
+
 # ---------------------------------------------------------------- 可选 VNC
 start_vnc() {
     [ "${VNC_ENABLED}" = "1" ] || return 0
@@ -279,6 +310,9 @@ main() {
     adb_keepalive &
     ADB_KEEPALIVE_PID=$!
     log "ADB 预连接已启动（目标：$(adb_targets | tr '\n' ' ')）"
+
+    # 截图与日志的磁盘治理，见 start_disk_hygiene 的注释
+    start_disk_hygiene
 
     # 守护：mxu 挂了先重启，连续退出就交出容器
     local restarts=0 code

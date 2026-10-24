@@ -1,5 +1,5 @@
 appname               = maayys-fnos
-version               = 1.0.6
+version               = 1.0.7
 display_name          = MaaYYs
 desc                  = 阴阳师自动化（MaaFramework + MXU Web 控制台），在浏览器里配置任务、看实时日志与截图
 platform              = x86

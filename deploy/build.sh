@@ -197,6 +197,33 @@ if [ "${DO_SMOKE}" = "1" ]; then
 
     echo "    /api/heartbeat 正常响应"
     docker rm -f maayys-smoke >/dev/null 2>&1 || true
+    # 深度冒烟。教训：这几次事故里两次是「heartbeat 正常但页面/WS 是坏的」——
+    # 白屏 = 首页 200 但 assets 404；断连 = WS 握手 403。只测 heartbeat 一次都拦不住。
+    base="http://127.0.0.1:18000"
+
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${base}/" || true)"
+    [ "${code}" = "200" ] || fail "冒烟失败：GET / 返回 ${code}（期望 200）"
+
+    js="$(curl -s --max-time 5 "${base}/" 2>/dev/null | grep -oE '/assets/index-[^"]+\.js' | head -1 || true)"
+    [ -n "${js}" ] || fail "冒烟失败：首页里找不到前端入口（/assets/index-*.js）"
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${base}${js}" || true)"
+    [ "${code}" = "200" ] || fail "冒烟失败：${js} 返回 ${code}（期望 200）—— 前端资源断链就是白屏"
+
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${base}/api/interface" || true)"
+    [ "${code}" = "200" ] || fail "冒烟失败：/api/interface 返回 ${code}（期望 200）"
+
+    # WS 握手成功后连接会一直挂着，靠 --max-time 断开；要的只是第一行的状态码
+    hs="$(curl -s -i --max-time 5 \
+        -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+        -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+        -H "Origin: ${base}" \
+        "${base}/api/ws" 2>/dev/null | head -1 || true)"
+    case "${hs}" in
+        *101*) : ;;
+        *) fail "冒烟失败：WS 握手返回「${hs}」（期望 101）—— 装上会提示「与后端连接断开」" ;;
+    esac
+
+    echo "    深度冒烟通过：/ 200、前端资源 200、接口 200、WS 101"
     echo "    冒烟通过"
 else
     log "[5/6] 跳过冒烟测试（--no-smoke）"

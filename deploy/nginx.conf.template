@@ -17,7 +17,9 @@ http {
     include      /etc/nginx/mime.types;
     default_type application/octet-stream;
 
-    access_log /data/logs/nginx-access.log;
+    # 访问日志平时关掉：心跳/截图轮询一秒好几条，一天能写几万行，纯占盘。
+    # 排查时把下行换回 `access_log /data/logs/nginx-access.log;` 再 reload。
+    access_log off;
     sendfile on;
     server_tokens off;
 
