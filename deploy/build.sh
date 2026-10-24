@@ -205,6 +205,15 @@ if [ "${DO_SMOKE}" = "1" ]; then
     # 失败时能分清是超时、拒绝连接还是状态码不对。
     base="http://127.0.0.1:18000"
 
+    # 失败时必须能看到容器内部发生了什么（mxu 崩溃、重启计数、entrypoint 决策都在这里）
+    smoke_diag() {
+        echo "    ---- 冒烟容器状态 ----"
+        docker ps -a --filter 'name=^maayys-smoke$' --format '  {{.Status}}  {{.Image}}' | sed 's/^/    /'
+        echo "    ---- 容器日志（尾部 60 行）----"
+        docker logs --tail 60 maayys-smoke 2>&1 | sed 's/^/    /'
+    }
+
+
     smoke_200() {
         local url="$1" name="$2" i code=000 err
         err="$(mktemp)"
@@ -219,6 +228,7 @@ if [ "${DO_SMOKE}" = "1" ]; then
         done
         echo "    curl 报错：$(tail -1 "$err" 2>/dev/null)"
         rm -f "$err"
+        smoke_diag
         fail "冒烟失败：${name} 最后返回 ${code}（期望 200），已重试 5 次"
     }
 
@@ -235,8 +245,17 @@ if [ "${DO_SMOKE}" = "1" ]; then
             esac
             sleep 3
         done
+        smoke_diag
         fail "冒烟失败：WS 握手返回「${hs}」（期望 101），已重试 5 次"
     }
+
+    smoke_ws
+
+    if ! docker ps --filter 'name=^maayys-smoke$' --format '{{.Names}}' | grep -q .; then
+        echo "    容器已退出，日志："
+        docker logs --tail 60 maayys-smoke 2>&1 | sed 's/^/    /'
+        fail "冒烟失败：容器在冒烟过程中退出。"
+    fi
 
     smoke_200 "${base}/" "GET /"
 
