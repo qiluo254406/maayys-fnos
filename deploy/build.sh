@@ -196,7 +196,6 @@ if [ "${DO_SMOKE}" = "1" ]; then
     fi
 
     echo "    /api/heartbeat 正常响应"
-    docker rm -f maayys-smoke >/dev/null 2>&1 || true
     # 深度冒烟。教训：这几次事故里两次是「heartbeat 正常但页面/WS 是坏的」——
     # 白屏 = 首页 200 但 assets 404；断连 = WS 握手 403。只测 heartbeat 一次都拦不住。
     #
@@ -268,6 +267,7 @@ if [ "${DO_SMOKE}" = "1" ]; then
     smoke_ws
 
     echo "    冒烟通过"
+    docker rm -f maayys-smoke >/dev/null 2>&1 || true
 else
     log "[5/6] 跳过冒烟测试（--no-smoke）"
 fi
