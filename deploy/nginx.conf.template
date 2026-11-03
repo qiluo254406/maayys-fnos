@@ -128,6 +128,32 @@ http {
 
             # 注意：不要给 application/json 开 sub_filter —— 那是用户数据，
             # 万一里面正好有 "/api 字样就被改了。
+
+            # ---------- 前端端口兜底 ----------
+            # 上游 MXU 的前端把后端地址拼成 `<当前主机名>:<webServerPort>`：
+            #   gn() = `${proto}//${location.hostname}:${xs}/api`
+            #   nm() = `${wsProto}//${location.hostname}:${Na}/api/ws`
+            # 而 xs/Na 来自 /api/interface 的 webServerPort（恒为 12701），
+            # 只要它 > 0，前端就永远走绝对地址 —— 等价于要求
+            # 「页面在哪个 origin 打开，哪个 origin 的 12701 端口上就得有后端」。
+            #
+            # 直连 http://nas:12701 天然满足；可一旦经飞牛统一网关
+            # (/app/maayys-fnos/)、官方 P2P 中转 (office.app.5ddd.com:42955)
+            # 或任意反代，页面端口就不再是 12701，请求会打到不存在的
+            # host:12701 上 —— 界面表现是红条「与后端连接断开，正在尝试重新连接」
+            # 加调试面板「MaaFramework 未初始化」（后者只是拿不到
+            # /api/maa/initialized 的连带症状，后端其实一直是 initialized:true）。
+            #
+            # 这里给「端口一致」加个前置条件：端口对不上就退回同源相对路径，
+            # 再由上面的规则补成 ${APP_PREFIX}/api。直连模式端口本来就等于 12701，
+            # 判断结果不变，行为与改动前完全一致。
+            #
+            # 两条匹配串在 bundle 里各只出现 1 次；上游改版后若消失，
+            # sub_filter 会**静默失效**（不报错）。验证：
+            #   curl -s http://nas:12701/assets/index-*.js | grep -c 'window.location.port===String'
+            # 期望输出 2。
+            sub_filter 'if(xs>0){'     'if(xs>0&&window.location.port===String(xs)){';
+            sub_filter 'if(Na&&Na>0){' 'if(Na&&Na>0&&window.location.port===String(Na)){';
         }
 
         # 可选逃生通道：MAAYYS_VNC=1 时才有上游，否则 502
@@ -159,6 +185,16 @@ http {
             proxy_send_timeout 3600s;
             proxy_buffering off;
             proxy_request_buffering off;
+
+            # 根路径同样要打端口兜底（原因见上面前缀段落）。
+            # 飞牛官方 P2P 中转是把应用挂在域名根上的（office.app.5ddd.com:42955），
+            # 没有前缀可补，退回的 /api 就是同源绝对路径，正好命中。
+            # 同理，sub_filter 只能改明文，得先把 Accept-Encoding 清掉。
+            proxy_set_header Accept-Encoding "";
+            sub_filter_once off;
+            sub_filter_types application/javascript text/javascript;
+            sub_filter 'if(xs>0){'     'if(xs>0&&window.location.port===String(xs)){';
+            sub_filter 'if(Na&&Na>0){' 'if(Na&&Na>0&&window.location.port===String(Na)){';
         }
     }
 }
