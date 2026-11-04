@@ -90,11 +90,32 @@ start_xvfb() {
 }
 
 # ---------------------------------------------------------------- MXU
+# 可选：启动后自动执行某个实例。配合飞牛的"开机自启"，等于让 NAS 一开机就把日常跑了。
+# 只在本次容器生命周期的第一次启动传参，避免 mxu 崩溃重启时把任务重复跑一遍。
+AUTORUN_INSTANCE="${MAAYYS_AUTORUN_INSTANCE:-}"
+AUTORUN_DONE=0
+
 start_mxu() {
     cd "${APP_DIR}" || die "无法进入 ${APP_DIR}"
-    ./mxu >> "${LOG_DIR}/mxu.log" 2>&1 &
+    if [ -n "${AUTORUN_INSTANCE}" ] && [ "${AUTORUN_DONE}" = "0" ]; then
+        AUTORUN_DONE=1
+        log "启动后自动执行实例：${AUTORUN_INSTANCE}"
+        ./mxu --autostart --instance "${AUTORUN_INSTANCE}" >> "${LOG_DIR}/mxu.log" 2>&1 &
+    else
+        ./mxu >> "${LOG_DIR}/mxu.log" 2>&1 &
+    fi
     MXU_PID=$!
     log "mxu 已启动（pid=${MXU_PID}）"
+}
+
+# 候选端口：MXU 的监听端口能在设置里改（webServerPort，重启生效）。
+# 用户在界面里改过之后，只扫 12701..12711 就会永远等不到，所以先探配置里写的值。
+web_port_candidates() {
+    {
+        grep -ho '"webServerPort"[[:space:]]*:[[:space:]]*[0-9][0-9]*' "${APP_DIR}"/config/*.json 2>/dev/null \
+            | grep -o '[0-9][0-9]*$'
+        seq "${WEB_PORT_BASE}" "$((WEB_PORT_BASE + WEB_PORT_SPAN))"
+    } | sort -un
 }
 
 # 等 MXU 的 Web 服务就绪。它绑 127.0.0.1（allowLanAccess 默认 false），
@@ -102,7 +123,7 @@ start_mxu() {
 wait_web() {
     local i port
     for i in $(seq 1 180); do
-        for port in $(seq "${WEB_PORT_BASE}" "$((WEB_PORT_BASE + WEB_PORT_SPAN))"); do
+        for port in $(web_port_candidates); do
             if curl -sf --max-time 1 "http://127.0.0.1:${port}/api/heartbeat" >/dev/null 2>&1; then
                 WEB_PORT="${port}"
                 log "MXU Web 服务就绪：127.0.0.1:${port}"

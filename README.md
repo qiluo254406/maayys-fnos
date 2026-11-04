@@ -37,6 +37,30 @@
 > 应用层完全重写 —— 差异逐条列在下面的对比表里。特别提醒：它那份指南的「换 Web 前端源码」
 > 和「镜像里 listen socket」两步，套到 MXU 上会直接白屏。
 
+### 这三个项目的版本关系（想升级前先看）
+
+上游 MaaYYs 把 MXU 和 MaaFramework 的版本**写死在自己的 CI 里**，所以全量包里的版本通常落后
+MaaXYZ 官方仓库：
+
+| 组件 | 全量包自带（1.0.9 基线） | 官方最新（2026-11-04） | 差距 |
+|---|---|---|---|
+| MXU | `v1.4.2`（来自 [TanyaShue/MXU](https://github.com/TanyaShue/MXU) 这个 fork） | `v2.8.1` | 落后约 3 周 |
+| MaaFramework | `v5.14.3` | `v5.15.0` | 1 个 minor |
+
+本项目**默认沿用上游自带的版本**（上游验证过的组合，最不容易出事），但留了两个开关单独覆盖：
+
+```bash
+bash deploy/build.sh --mxu-version v2.8.1       # 换官方 MXU，包里只有一个 mxu 可执行文件
+bash deploy/build.sh --maafw-version v5.15.0    # 换官方 MaaFramework，包内是 bin/ 与 MaaAgentBinary
+```
+
+云端构建也能用：Actions 里手动跑 `build-fpk`，填 `mxu_version` / `maafw_version` 两个输入。
+实际用了哪两个版本会写进 `latest.json` 的 `mxu_version` / `maafw_version` 字段，事后可对账。
+
+> 升级前留意两点：MXU 官方 `v2.x` 的 `getApiBase()` **仍然**是「`hostname` + 后端端口」的拼法
+> （`src/utils/backendApi.ts`），所以本项目的 `sub_filter` 补丁换版本后一样要留着；
+> MaaFramework 跨 minor 升级要确认 MaaYYs 的 Go agent 还能正常加载。
+
 ## 许可证与免责
 
 本仓库只包含**打包脚本与配置**，不含游戏内容，也不分发 MaaYYs 的二进制
@@ -111,20 +135,19 @@ MaaYYs / MaaFramework / MXU 各自遵循其原许可证，使用前请自行阅�
 
 ### 体积是怎么构成的（想再瘦看这里）
 
-清理前是镜像 3.0GB / 安装包 1.3GB，现在是 **1.62GB / 584MB**。去掉的是两块纯浪费：
+清理前是镜像 3.0GB / 安装包 1.3GB，现在是 **1.62GB / 584MB**（1.0.9 换字体后再降约 85MB）。去掉的是几块纯浪费：
 
 | 项 | 之前 | 处理 |
 |---|---|---|
 | `apt` 的 .deb 缓存 | **343MB** | `apt-get clean` 与 install 写在同一个 `RUN` 里（分层机制决定：跨层删等于没删） |
 | 上游 tar.gz 被 COPY 进层 | **265MB** | 改用 `RUN --mount=type=bind`，包只喂给 `tar`，不落层 |
+| `fonts-noto-cjk` 全量 CJK 字体 | **91MB** | 1.0.9 换成文泉驿微米黑（5MB）：真正给用户看的是浏览器渲染的页面，容器里的字体只影响 `MAAYYS_VNC=1` 那条排障通道 |
 
 剩下的大头是 `/opt/maayys-dist` 约 785MB —— **MaaYYs 自己的资源图**，PNG 已经压过，
 再压就是有损的（会掉模板匹配准确率，不建议）。所以这块基本是地板。
 
-还想更小有两个可选项，各有代价：
-
-- 换掉 `fonts-noto-cjk`（约 93MB）用更小的中文字体，能省 ~70MB，但生僻字/多语言覆盖会变差
-- 去掉 noVNC / x11vnc / websockify（逃生通道，约 30MB），省不了多少还少了条后路
+还想更小只剩一个可选项：去掉 noVNC / x11vnc / websockify（逃生通道，约 30MB），
+省不了多少还少了条后路，不建议动。
 
 ## 用起来
 
@@ -144,6 +167,22 @@ MaaYYs / MaaFramework / MXU 各自遵循其原许可证，使用前请自行阅�
 
 > 停用应用时容器会收到 SIGTERM 并转给 mxu，留 10 秒存配置。**正在跑的任务链会被中断** ——
 > MaaFramework 没有「暂停到安全点」的接口，这是 MXU 的限制，不是这里偷懒。
+
+### 让它开机自动跑一遍（1.0.9 起）
+
+NAS 最大的用处是「不用人管」。给容器加一个环境变量，启动后就会自动执行指定实例
+（实例名就是左侧列表里那个，如「一键日常」）：
+
+```bash
+MAAYYS_AUTORUN_INSTANCE=一键日常
+```
+
+容器启动时等价于 `mxu --autostart --instance "一键日常"`。只在**本次容器生命周期的第一次启动**生效 ——
+mxu 万一崩了被守护进程拉起时不会再跑一遍，避免重复执行。
+
+> 定时（比如每天 3 点）用 MXU 自己的「定时任务」配，不要靠容器重启来做。
+> 加变量：编辑 `/vol{N}/@appcenter/maayys-fnos/cmd/main`，在 `docker run` 那串参数里加一行
+> `-e MAAYYS_AUTORUN_INSTANCE=一键日常 \`，然后 `sudo appcenter-cli restart maayys-fnos`。
 
 ## 在外面用（远程访问）
 

@@ -3,13 +3,15 @@
 #
 #   bash deploy/build.sh                      # 默认：下载 v3.17.11 → 建镜像 → 冒烟 → 导出 → 打 fpk
 #   bash deploy/build.sh --version v3.18.0    # 换上游版本
+#   bash deploy/build.sh --mxu-version v2.8.1        # 用官方 MXU 覆盖上游自带的那个
+#   bash deploy/build.sh --maafw-version v5.15.0     # 用官方 MaaFramework 覆盖上游自带的
 #   bash deploy/build.sh --offline            # 复用构建目录里已下好的包
 #   bash deploy/build.sh --no-smoke           # 跳过冒烟测试
 #   bash deploy/build.sh --image-only         # 只建镜像，不打 fpk
 #
 # 前置：Docker（构建机）、curl、gzip、tar。fnpack 会自动下载。
 # 磁盘：约 8GB（上游包 254MB + 镜像 ~2.8GB + 导出包 1.3GB + fpk 1.3GB）
-# 大头在 MaaYYs 自身：全量包解压后约 1.5GB（资源图多），再叠加 WebKitGTK/CJK 字体/LLVM。
+# 大头在 MaaYYs 自身：全量包解压后约 1.5GB（资源图多），再叠加 WebKitGTK/字体/LLVM。
 #
 # 不要在日用的飞牛上跑构建：吃 CPU/IO，且 docker build 期间镜像层会把存储撑满。
 
@@ -19,6 +21,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 UPSTREAM_REPO="TanyaShue/MaaYYs"
 UPSTREAM_VERSION="v3.17.11"      # 本项目核对过的版本；换版本前先确认目录结构没变
+# 上游把 MXU / MaaFramework 的版本锁在自己的 CI 里（MXU 还是 TanyaShue/MXU 这个 fork），
+# 想跟上 MaaXYZ 官方仓库时用这两个开关单独覆盖，留空则沿用上游全量包内的版本。
+MXU_VERSION=""
+MAAFW_VERSION=""
 WORK="${MAAYYS_BUILD_WORK:-${REPO_ROOT}/build-work}"
 IMAGE_TAG="maayys-fnos:local"
 
@@ -35,6 +41,8 @@ APT_MIRROR="http://mirrors.aliyun.com/ubuntu"
 while [ $# -gt 0 ]; do
     case "$1" in
         --version)    UPSTREAM_VERSION="${2:?--version 需要一个值}"; shift 2 ;;
+        --mxu-version)   MXU_VERSION="${2?--mxu-version 需要一个值}"; shift 2 ;;
+        --maafw-version) MAAFW_VERSION="${2?--maafw-version 需要一个值}"; shift 2 ;;
         --work)       WORK="${2:?--work 需要一个值}"; shift 2 ;;
         # 用 ${2?} 而不是 ${2:?}：后者把空字符串也当成"没给值"，
         # 而国内镜像源在 CI（国外 runner）上是反效果，需要显式传空切回官方源。
@@ -133,6 +141,51 @@ rm -f "${LIST_FILE}"
 trap - EXIT
 echo "    结构校验通过"
 
+# ---------------------------------------------------------------- 2b. 可选版本覆盖
+# 上游 MaaYYs 把 MXU / MaaFramework 的版本锁在自己 CI 里（MXU 用的是 TanyaShue/MXU 这个 fork），
+# 常落后 MaaXYZ 官方仓库若干版本。这两份包不在这里解压，原样放进 overrides/，
+# 由 Dockerfile 用 bind mount 取用 —— 走 COPY 的话 180MB+ 会永久留在镜像层里。
+OVERRIDE_DIR="${WORK}/overrides"
+mkdir -p "${OVERRIDE_DIR}"
+rm -f "${OVERRIDE_DIR}/mxu.tar.gz" "${OVERRIDE_DIR}/maafw.zip"
+
+if [ -n "${MXU_VERSION}" ]; then
+    log "[2/6] 覆盖 MXU -> ${MXU_VERSION}"
+    MXU_URL="https://github.com/MaaXYZ/MXU/releases/download/${MXU_VERSION}/MXU-linux-x86_64-${MXU_VERSION}.tar.gz"
+    echo "    下载：${MXU_URL}"
+    curl -fL --retry 3 --retry-delay 2 -o "${OVERRIDE_DIR}/mxu.tar.gz.part" "${MXU_URL}" \
+        || fail "MXU ${MXU_VERSION} 下载失败，确认 tag 与资产名是否存在。"
+    mv -f "${OVERRIDE_DIR}/mxu.tar.gz.part" "${OVERRIDE_DIR}/mxu.tar.gz"
+    gzip -t "${OVERRIDE_DIR}/mxu.tar.gz" || fail "MXU 包不完整（gzip 校验失败）。"
+
+    # 先落盘再 grep：`tar -tzf | grep -q` 会在命中时 SIGPIPE 掉 tar，
+    # pipefail 下整条管道被判成失败（同 LIST_FILE 的处理，见上）
+    tar -tzf "${OVERRIDE_DIR}/mxu.tar.gz" > "${WORK}/.mxu.list" || fail "读不了 MXU 包。"
+    grep -qE '^\.?/?mxu$' "${WORK}/.mxu.list" \
+        || fail "MXU ${MXU_VERSION} 包里没有顶层 mxu，结构与预期不符。"
+    rm -f "${WORK}/.mxu.list"
+    echo "    完成：$(du -h "${OVERRIDE_DIR}/mxu.tar.gz" | cut -f1)"
+fi
+
+if [ -n "${MAAFW_VERSION}" ]; then
+    log "[2/6] 覆盖 MaaFramework -> ${MAAFW_VERSION}"
+    command -v unzip >/dev/null 2>&1 || fail "校验 MaaFramework 包需要 unzip（apt install unzip）。"
+    MAAFW_URL="https://github.com/MaaXYZ/MaaFramework/releases/download/${MAAFW_VERSION}/MAA-linux-x86_64-${MAAFW_VERSION}.zip"
+    echo "    下载：${MAAFW_URL}"
+    curl -fL --retry 3 --retry-delay 2 -o "${OVERRIDE_DIR}/maafw.zip.part" "${MAAFW_URL}" \
+        || fail "MaaFramework ${MAAFW_VERSION} 下载失败，确认 tag 与资产名是否存在。"
+    mv -f "${OVERRIDE_DIR}/maafw.zip.part" "${OVERRIDE_DIR}/maafw.zip"
+    unzip -l "${OVERRIDE_DIR}/maafw.zip" > "${WORK}/.maafw.list" || fail "读不了 MaaFramework 包。"
+    grep -q 'bin/' "${WORK}/.maafw.list" \
+        || fail "MaaFramework ${MAAFW_VERSION} 包里没有 bin/，结构与预期不符。"
+    rm -f "${WORK}/.maafw.list"
+    echo "    完成：$(du -h "${OVERRIDE_DIR}/maafw.zip" | cut -f1)"
+fi
+
+if [ -z "${MXU_VERSION}${MAAFW_VERSION}" ]; then
+    echo "    MXU / MaaFramework：沿用上游全量包内的版本"
+fi
+
 # ---------------------------------------------------------------- 3. 构建上下文
 log "[3/6] 准备构建上下文"
 
@@ -157,6 +210,8 @@ docker build \
     -t "${IMAGE_TAG}" \
     --build-arg "MAAYYS_TARBALL=$(basename "${TARBALL}")" \
     --build-arg "MAAYYS_VERSION=${UPSTREAM_VERSION}" \
+    --build-arg "MXU_VERSION=${MXU_VERSION}" \
+    --build-arg "MAAFW_VERSION=${MAAFW_VERSION}" \
     --build-arg "APT_MIRROR=${APT_MIRROR}" \
     "${WORK}"
 
@@ -317,6 +372,8 @@ mv -f "${FPK_SRC}" "${FPK_OUT}"
 echo
 echo "================ 构建完成 ================"
 echo "上游版本 : ${UPSTREAM_VERSION}"
+echo "MXU      : ${MXU_VERSION:-上游包自带}"
+echo "MaaFW    : ${MAAFW_VERSION:-上游包自带}"
 echo "镜像     : ${IMAGE_TAG}"
 echo "fpk      : ${FPK_OUT}  ($(du -h "${FPK_OUT}" | cut -f1))"
 FPK_SHA=""
@@ -331,6 +388,8 @@ cat > "${REPO_ROOT}/dist/.last-build.json" <<EOF
 {
   "app_version": "${APP_VER:-unknown}",
   "upstream_version": "${UPSTREAM_VERSION}",
+  "mxu_version": "${MXU_VERSION:-bundled}",
+  "maafw_version": "${MAAFW_VERSION:-bundled}",
   "fpk": "$(basename "${FPK_OUT}")",
   "size_bytes": $(stat -c '%s' "${FPK_OUT}" 2>/dev/null || echo 0),
   "sha256": "${FPK_SHA}",

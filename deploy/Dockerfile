@@ -41,13 +41,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     APP_DIR=/data/app \
     GATEWAY_DIR=/gw
 
-# 中文界面必须有 CJK 字体，否则 MXU 里全是方块。
+# 字体只影响容器内那个看不见的 Tauri 窗口（真正给用户看的是浏览器渲染的页面），
+# 所以不需要完整的 fonts-noto-cjk（装完 91MB）。文泉驿微米黑 5MB 足够让
+# MAAYYS_VNC=1 的排障通道里中文正常显示。
 # GTK3 / ALSA 在 24.04 走了 t64 改名，这里新名优先、旧名兜底，避免换个基础镜像就构建失败。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         xvfb x11vnc novnc websockify \
-        nginx-light curl ca-certificates tzdata gettext-base procps \
-        fonts-noto-cjk fontconfig dbus-x11 \
+        nginx-light curl ca-certificates tzdata gettext-base procps unzip \
+        fonts-wqy-microhei fontconfig dbus-x11 \
         libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 \
         libayatana-appindicator3-1 libnss3 libsoup-3.0-0 \
         libgomp1 libgl1 libglib2.0-0 adb \
@@ -83,6 +85,45 @@ RUN --mount=type=bind,source=${MAAYYS_TARBALL},target=/tmp/maayys.tar.gz \
     && chmod +x "${PRISTINE_DIR}/mxu" \
     && (chmod +x "${PRISTINE_DIR}/agent/agent" 2>/dev/null || true) \
     && printf '%s\n' "${MAAYYS_VERSION}" > "${PRISTINE_DIR}/.dist-version"
+
+# ---------- 可选：用官方仓库的版本覆盖 ----------
+# 上游 MaaYYs 打包时把 MXU 与 MaaFramework 的版本写死在自己的 CI 里
+# （MXU 取自 TanyaShue/MXU 这个 fork，MaaFramework 固定在 5.14.x），
+# 通常比 MaaXYZ 官方仓库落后若干版本。这两个构建参数用来只换那两样东西：
+#   MXU_VERSION     MaaXYZ/MXU 的 tag，包里只有一个 mxu 可执行文件
+#   MAAFW_VERSION   MaaXYZ/MaaFramework 的 tag，包内是 bin/ 与 share/MaaAgentBinary
+# 留空 = 完全沿用上游全量包内的版本（默认，与旧版行为一致）。
+#
+# 挂 overrides 目录而不是 COPY：两份包加起来 180MB+，COPY 会永久留在镜像层里。
+ARG MXU_VERSION=
+ARG MAAFW_VERSION=
+
+RUN --mount=type=bind,source=overrides,target=/tmp/overrides \
+    set -eu; \
+    mkdir -p /tmp/ovx; \
+    if [ -f /tmp/overrides/mxu.tar.gz ]; then \
+        tar -xzf /tmp/overrides/mxu.tar.gz -C /tmp/ovx; \
+        test -f /tmp/ovx/mxu || { echo "ERROR: MXU 包里没有 mxu 可执行文件"; exit 1; }; \
+        chmod +x /tmp/ovx/mxu; \
+        mv -f /tmp/ovx/mxu "${PRISTINE_DIR}/mxu"; \
+        echo "MXU 已覆盖：${MXU_VERSION}"; \
+    fi; \
+    if [ -f /tmp/overrides/maafw.zip ]; then \
+        unzip -q /tmp/overrides/maafw.zip -d /tmp/ovx/mfw; \
+        test -d /tmp/ovx/mfw/bin || { echo "ERROR: MaaFramework 包里没有 bin/"; exit 1; }; \
+        rm -rf "${PRISTINE_DIR}/maafw"; \
+        mkdir -p "${PRISTINE_DIR}/maafw"; \
+        cp -a /tmp/ovx/mfw/bin/. "${PRISTINE_DIR}/maafw/"; \
+        if [ -d /tmp/ovx/mfw/share/MaaAgentBinary ]; then \
+            cp -a /tmp/ovx/mfw/share/MaaAgentBinary "${PRISTINE_DIR}/maafw/MaaAgentBinary"; \
+        fi; \
+        chmod +x "${PRISTINE_DIR}"/maafw/Maa* 2>/dev/null || true; \
+        find "${PRISTINE_DIR}/maafw/MaaAgentBinary" -type f -exec chmod +x {} + 2>/dev/null || true; \
+        echo "MaaFramework 已覆盖：${MAAFW_VERSION}"; \
+    fi; \
+    rm -rf /tmp/ovx; \
+    printf '%s|mxu:%s|maafw:%s\n' "${MAAYYS_VERSION}" "${MXU_VERSION:-bundled}" "${MAAFW_VERSION:-bundled}" \
+        > "${PRISTINE_DIR}/.dist-version"
 
 # ---------- 运行期外壳 ----------
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

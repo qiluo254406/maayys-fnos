@@ -20,6 +20,14 @@ on:
         description: '上游版本（留空 = latest）'
         required: false
         default: 'latest'
+      mxu_version:
+        description: '覆盖 MXU 版本（如 v2.8.1；留空 = 用 MaaYYs 自带的）'
+        required: false
+        default: ''
+      maafw_version:
+        description: '覆盖 MaaFramework 版本（如 v5.15.0；留空 = 用 MaaYYs 自带的）'
+        required: false
+        default: ''
   # 改了外壳代码就自动跑一次，省得手动点。
   # 重复构建不会发生：下面的 gate 步骤发现同上游版本的 Release 已存在就直接跳过。
   push:
@@ -128,10 +136,14 @@ jobs:
         if: steps.gate.outputs.skip == 'false'
         run: |
           # runner 在国外，用官方 apt 源；国内构建机才用阿里云（build.sh 默认）
-          bash deploy/build.sh \
-            --version "${{ steps.ver.outputs.upstream }}" \
-            --work "$PWD/build-work" \
-            --apt-mirror ""
+          args=(--version "${{ steps.ver.outputs.upstream }}" --work "$PWD/build-work" --apt-mirror "")
+          if [ -n "${{ github.event.inputs.mxu_version }}" ]; then
+            args+=(--mxu-version "${{ github.event.inputs.mxu_version }}")
+          fi
+          if [ -n "${{ github.event.inputs.maafw_version }}" ]; then
+            args+=(--maafw-version "${{ github.event.inputs.maafw_version }}")
+          fi
+          bash deploy/build.sh "${args[@]}"
 
       - name: 整理产物
         if: steps.gate.outputs.skip == 'false'
@@ -143,10 +155,16 @@ jobs:
           cp -f "$fpk" dist/maayys-fnos.fpk          # 固定名字，NAS 认这个
           sha="$(sha256sum "$fpk" | cut -d' ' -f1)"
           size="$(stat -c %s "$fpk")"
+          mxu_ver="${{ github.event.inputs.mxu_version }}"
+          maafw_ver="${{ github.event.inputs.maafw_version }}"
+          [ -n "$mxu_ver" ] || mxu_ver=bundled
+          [ -n "$maafw_ver" ] || maafw_ver=bundled
           cat > dist/latest.json <<EOF
           {
             "app_version": "${APP_VER}",
             "upstream_version": "${{ steps.ver.outputs.upstream }}",
+            "mxu_version": "${mxu_ver}",
+            "maafw_version": "${maafw_ver}",
             "fpk": "${base}",
             "size_bytes": ${size},
             "sha256": "${sha}",
