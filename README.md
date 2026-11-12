@@ -93,7 +93,7 @@ MaaYYs / MaaFramework / MXU 各自遵循其原许可证，使用前请自行阅�
    按 `hostname:webServerPort`（默认 12701）—— 页面自己不知道"我是被哪个端口访问的"。
    挂在 `/app/maayys-fnos/` 下时，页面会去 `host:12701` 找后端 → 同源失败 → WS 连不上。
    1.0.8 起容器 nginx 用 `sub_filter` 给这段逻辑加了「端口兜底」：端口对不上就退回同源相对路径，
-   直连模式行为不变，网关/中转/反代也都能用（见 [在外面用](#在外面用远程访问)）。
+   直连模式行为不变，网关/中转/反代也都能用。
 
 ```
 浏览器 ──HTTP──> <NAS>:12701 ──docker publish──> 容器 18000 (nginx) ──> 127.0.0.1:12701 (MXU Web)
@@ -112,7 +112,7 @@ MaaYYs / MaaFramework / MXU 各自遵循其原许可证，使用前请自行阅�
    bash deploy/build.sh
    ```
    产物在 `dist/maayys-fnos_1.0.5_v3.17.11.fpk`（**584MB**，内置离线镜像，安装时不用联网）。
-   也可以完全跳过本地构建，直接用 CI 出的包（见 [不想在本地构建？](#不想在本地构建云端构建--自动更新)）。
+   也可以完全跳过本地构建，直接用 CI 出的包。
 2. 飞牛 **应用中心 → 左下角手动安装 → 从电脑上传**，选这个 fpk。
 3. 装完在应用中心启动，点桌面 **MAAYYs** 图标 —— 会在浏览器里打开 `http://<NAS>:12701/`。
 
@@ -184,39 +184,6 @@ mxu 万一崩了被守护进程拉起时不会再跑一遍，避免重复执行�
 > 加变量：编辑 `/vol{N}/@appcenter/maayys-fnos/cmd/main`，在 `docker run` 那串参数里加一行
 > `-e MAAYYS_AUTORUN_INSTANCE=一键日常 \`，然后 `sudo appcenter-cli restart maayys-fnos`。
 
-## 在外面用（远程访问）
-
-1.0.7 及以前，只有「页面所在 origin 的 12701 端口上真有后端」才连得上，所以只能局域网直连，
-或者让 Knock 把 `12701` 原样反代出去（端口号仍是 12701，前端的硬编码才碰得到）。
-
-1.0.8 起容器 nginx 给前端打了「端口兜底」补丁：拼后端地址前先看 `location.port` 是否等于
-`webServerPort`（12701），不等就退回同源相对路径 `/api`、`/api/ws`（走网关时还会补上
-`/app/maayys-fnos` 前缀）。于是下面这些入口都能用了：
-
-| 入口 | 页面 origin | 前端实际请求 |
-|---|---|---|
-| 局域网直连 | `http://<NAS>:12701` | `http://<NAS>:12701/api`（与旧版完全一致） |
-| 飞牛统一网关 | `http://<NAS>:5666/app/maayys-fnos/` | `/app/maayys-fnos/api` |
-| 飞牛 APP / 官方中转 | `https://office.app.5ddd.com:<端口>` | 同源 `/api` |
-| Knock / 任意反代 | 任意域名 | 同源 `/api` |
-
-**出问题先查这两件事**（日志都在 `maayys-data/logs/`）：
-
-1. **反代必须透传 WebSocket**（`Upgrade` / `Connection` 头）。不透传的话页面能开、接口能通，
-   但顶部会一直红条「与后端连接断开，正在尝试重新连接」，截图也不刷新。
-2. **外层若另有鉴权**（如 fn-knock），要放行 `/api/*` 和 `/api/ws`，否则前端拿到的是登录页
-   HTML 而不是 JSON，表现为调试面板显示「MaaFramework 未初始化」（后端其实一直是
-   `initialized: true`）。
-
-> 判定方法：手机/浏览器直接打开 `<入口地址>/api/maa/initialized`。返回
-> `{"initialized":true,"version":"v5.x.x"}` 说明 API 通了；跳登录页或返回 HTML 就是第 2 条。
-
-**安全提醒**：反代之后，MXU 控制台就暴露在公网路径上了。MXU 自己没有登录验证，
-能不能被陌生人打开完全取决于外层鉴权。请确认：
-
-- Knock / 反代链接是否需要先登录你的飞牛账号（fnID）才可访问
-- 不要把完整地址发给无关的人；不用时可在 Knock 里关掉这条反代
-
 ## 更新
 
 分两种情况，别混：
@@ -242,73 +209,14 @@ bash deploy/build.sh --version latest
 
 比如改了 nginx 配置、cmd/main、端口号：
 
-1. **必须**升 `fnos-app/manifest` 里的 `version`，并在 `changelog` 加一句（CI 会自动做这一步）。
+1. **必须**升 `fnos-app/manifest` 里的 `version`，并在 `changelog` 加一句。
+   走 CI 的话，发布时会自动 +1 并把结果回写仓库；本地手打则要自己升。
    否则 fnOS 认为版本没变，不给覆盖安装。
 2. 重打：`bash deploy/build.sh --version v3.17.11`（复用已下好的上游包）。
 
 > 一个坑记在这：如果本次只改了**运行参数**（端口映射、挂载、env）而镜像内容没变，
 > 镜像 ID 会和上一版一模一样。`cmd/main` 现在除了比对镜像 ID，还会比对端口映射
 > （`container_port_matches`），对不上就重建容器 —— 否则会出现"装完了但没生效"。
-
-## 不想在本地构建？（云端构建 + 自动更新）
-
-按"要多自动"分三层，建议先只用 A。
-
-### A. 云端构建，本机不用装 Docker
-
-把本仓库推到 GitHub，`.github/workflows/build-fpk.yml` 会：
-
-- **每天 03:00** 查一次上游 MaaYYs 有没有新 release，有就构建
-- 也能手动触发：Actions → build-fpk → Run workflow（可指定上游版本）
-- 构建完发到 **Release**（tag = 上游版本），带三个文件：
-  `maayys-fnos_<应用版本>_<上游版本>.fpk`、固定名 `maayys-fnos.fpk`、`latest.json`
-- 同一上游版本不会重复构建（Release 已存在就直接跳过，日常跑一次只要几十秒）
-
-之后你只需要在应用中心上传新 fpk。**仓库必须是 public** —— 私有仓库的 Release 资源下载要鉴权，
-下面 B 的自动更新会失败。
-
-> CI 里有个坑我提前处理了：fnOS 不接受同版本号覆盖安装，所以工作流会在每次发布前
-> **自动把 patch 位 +1**（人力只维护 major.minor）。
-
-### B. 连安装也自动（NAS 上的 systemd timer）
-
-一次性配置，SSH 到 NAS 用 root：
-
-```bash
-# 1. 脚本与 unit 就位
-mkdir -p /vol2/@appdata/maayys-fnos
-cp tools/nas-auto-update.sh /vol2/@appdata/maayys-fnos/
-chmod +x /vol2/@appdata/maayys-fnos/nas-auto-update.sh
-cp tools/maayys-auto-update.{service,timer} /etc/systemd/system/
-
-# 2. 改三处：仓库名、卷号、代理（你这台 NAS 自己有 Clash，代理写 http://127.0.0.1:7890）
-vi /etc/systemd/system/maayys-auto-update.service
-
-# 3. 启用
-systemctl daemon-reload && systemctl enable --now maayys-auto-update.timer
-
-# 4. 立刻试跑一次，看日志
-systemctl start maayys-auto-update.service
-tail -20 /vol2/@appdata/maayys-fnos/auto-update.log
-```
-
-脚本流程：读 `latest.json` → 比版本（**只升不降**）→ 下载 → **校验 sha256** → `appcenter-cli install-fpk`
-→ `start`。校验不过或安装失败就保持旧版本不动，日志在 `/vol2/@appdata/maayys-fnos/auto-update.log`。
-
-> ⚠️ 这是 root 权限、自动安装从网上下载的包。虽然做了 sha256 校验（防传输损坏），
-> 但**信任根是那个 GitHub 仓库** —— 仓库被改就等于把机器交出去。
-> 所以别把仓库写权限给不信任的人；介意的话就只用 A，手动点安装。
-
-### C. 只更新 MaaYYs 本体、不换 fpk（没做，也不建议）
-
-理论上可以让容器自己去拉新的 MaaYYs 全量包、替换 `/data/app` 里的程序文件
-（`seed_app()` 已经是这个思路）。没做的原因：
-
-- 容器内要能直达 GitHub（你这台 NAS 有代理，技术上可行）
-- 需要额外的原子切换与失败回滚，否则一次下载中断就把程序文件搞坏
-- 会和 `seed_app()` 的版本标记互相覆盖，得先重构
-
-收益只是"省掉发新 fpk"，风险比 A+B 都高，所以留作以后可选项。
 
 ## 出问题了
 
