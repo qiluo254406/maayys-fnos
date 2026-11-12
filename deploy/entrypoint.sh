@@ -27,6 +27,7 @@ APP_PREFIX="${APP_PREFIX:-/app/maayys-fnos}"
 
 XVFB_PID=""
 MXU_PID=""
+MXU_STARTED_AT=0
 X11VNC_PID=""
 WEBSOCKIFY_PID=""
 SHUTTING_DOWN=0
@@ -105,6 +106,7 @@ start_mxu() {
         ./mxu >> "${LOG_DIR}/mxu.log" 2>&1 &
     fi
     MXU_PID=$!
+    MXU_STARTED_AT="$(date +%s)"
     log "mxu 已启动（pid=${MXU_PID}）"
 }
 
@@ -335,16 +337,21 @@ main() {
     # 截图与日志的磁盘治理，见 start_disk_hygiene 的注释
     start_disk_hygiene
 
-    # 守护：mxu 挂了先重启，连续退出就交出容器
-    local restarts=0 code
+    # 守护：mxu 挂了先重启，连续快速退出就交出容器
+    local restarts=0 code now
     while :; do
         wait "${MXU_PID}"
         code=$?
         [ "${SHUTTING_DOWN}" = "1" ] && break
 
+        # restarts 只统计连续快速退出；本次存活超过 300 秒，就清除此前的失败历史。
+        now="$(date +%s)"
+        if [ "$((now - MXU_STARTED_AT))" -gt 300 ]; then
+            restarts=0
+        fi
         restarts=$((restarts + 1))
         if [ "${restarts}" -gt 3 ]; then
-            log "ERROR: mxu 连续退出 ${restarts} 次（最后一次 code=${code}），容器退出"
+            log "ERROR: mxu 连续快速退出 ${restarts} 次（最后一次 code=${code}），容器退出"
             exit 1
         fi
 
