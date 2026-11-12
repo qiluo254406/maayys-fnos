@@ -184,39 +184,6 @@ mxu 万一崩了被守护进程拉起时不会再跑一遍，避免重复执行�
 > 加变量：编辑 `/vol{N}/@appcenter/maayys-fnos/cmd/main`，在 `docker run` 那串参数里加一行
 > `-e MAAYYS_AUTORUN_INSTANCE=一键日常 \`，然后 `sudo appcenter-cli restart maayys-fnos`。
 
-## 在外面用（远程访问）
-
-1.0.7 及以前，只有「页面所在 origin 的 12701 端口上真有后端」才连得上，所以只能局域网直连，
-或者让 Knock 把 `12701` 原样反代出去（端口号仍是 12701，前端的硬编码才碰得到）。
-
-1.0.8 起容器 nginx 给前端打了「端口兜底」补丁：拼后端地址前先看 `location.port` 是否等于
-`webServerPort`（12701），不等就退回同源相对路径 `/api`、`/api/ws`（走网关时还会补上
-`/app/maayys-fnos` 前缀）。于是下面这些入口都能用了：
-
-| 入口 | 页面 origin | 前端实际请求 |
-|---|---|---|
-| 局域网直连 | `http://<NAS>:12701` | `http://<NAS>:12701/api`（与旧版完全一致） |
-| 飞牛统一网关 | `http://<NAS>:5666/app/maayys-fnos/` | `/app/maayys-fnos/api` |
-| 飞牛 APP / 官方中转 | `https://office.app.5ddd.com:<端口>` | 同源 `/api` |
-| Knock / 任意反代 | 任意域名 | 同源 `/api` |
-
-**出问题先查这两件事**（日志都在 `maayys-data/logs/`）：
-
-1. **反代必须透传 WebSocket**（`Upgrade` / `Connection` 头）。不透传的话页面能开、接口能通，
-   但顶部会一直红条「与后端连接断开，正在尝试重新连接」，截图也不刷新。
-2. **外层若另有鉴权**（如 fn-knock），要放行 `/api/*` 和 `/api/ws`，否则前端拿到的是登录页
-   HTML 而不是 JSON，表现为调试面板显示「MaaFramework 未初始化」（后端其实一直是
-   `initialized: true`）。
-
-> 判定方法：手机/浏览器直接打开 `<入口地址>/api/maa/initialized`。返回
-> `{"initialized":true,"version":"v5.x.x"}` 说明 API 通了；跳登录页或返回 HTML 就是第 2 条。
-
-**安全提醒**：反代之后，MXU 控制台就暴露在公网路径上了。MXU 自己没有登录验证，
-能不能被陌生人打开完全取决于外层鉴权。请确认：
-
-- Knock / 反代链接是否需要先登录你的飞牛账号（fnID）才可访问
-- 不要把完整地址发给无关的人；不用时可在 Knock 里关掉这条反代
-
 ## 更新
 
 分两种情况，别混：
