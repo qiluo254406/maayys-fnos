@@ -286,6 +286,23 @@ if [ "${DO_SMOKE}" = "1" ]; then
         fail "冒烟失败：${name} 最后返回 ${code}（期望 200），已重试 5 次"
     }
 
+    # sub_filter 失效不一定影响 heartbeat/WS，必须直接数补丁锚点；小文件通常是错误页。
+    smoke_sub_filter() {
+        local file="$1" count size
+        count="$(grep -c 'window.location.port===String' "${file}" || true)"
+        size="$(stat -c '%s' "${file}" 2>/dev/null || echo 0)"
+        if [ "${size}" -le 102400 ]; then
+            smoke_diag
+            fail "冒烟失败：前端 JS 仅 ${size} 字节（期望 > 100KB），可能拿到了错误页"
+        fi
+        if [ "${count}" != "2" ]; then
+            echo "    sub_filter 实际计数：${count}（期望 2）"
+            smoke_diag
+            fail "上游前端结构变了，需重新确认 nginx.conf.template 的补丁锚点"
+        fi
+        echo "    sub_filter 补丁 -> 2 处（JS ${size} 字节）"
+    }
+
     smoke_ws() {
         local i hs="(空)"
         for i in 1 2 3 4 5; do
@@ -316,6 +333,14 @@ if [ "${DO_SMOKE}" = "1" ]; then
     js="$(curl -s --max-time 5 "${base}/" 2>/dev/null | grep -oE '/assets/index-[^"]+\.js' | head -1 || true)"
     [ -n "${js}" ] || fail "冒烟失败：首页里找不到前端入口（/assets/index-*.js）"
     smoke_200 "${base}${js}" "前端资源"
+    js_file="$(mktemp)"
+    if ! curl -sfS --max-time 8 "${base}${js}" -o "${js_file}"; then
+        rm -f "${js_file}"
+        smoke_diag
+        fail "冒烟失败：下载前端 JS 失败，无法检查 sub_filter 补丁"
+    fi
+    smoke_sub_filter "${js_file}"
+    rm -f "${js_file}"
 
     smoke_200 "${base}/api/interface" "接口"
 
