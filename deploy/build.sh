@@ -289,7 +289,9 @@ if [ "${DO_SMOKE}" = "1" ]; then
     # sub_filter 失效不一定影响 heartbeat/WS，必须直接数补丁锚点；小文件通常是错误页。
     smoke_sub_filter() {
         local file="$1" count size
-        count="$(grep -c 'window.location.port===String' "${file}" || true)"
+        # 数「出现次数」而不是行数：minified 的 bundle 会把两处压在同一行，grep -c 只会给 1。
+        # pipefail 下 grep 无匹配返回 1，用 || true 兜住（wc 仍会输出 0）。
+        count="$(grep -o 'window.location.port===String' "${file}" 2>/dev/null | wc -l | tr -d ' ' || true)"
         size="$(stat -c '%s' "${file}" 2>/dev/null || echo 0)"
         if [ "${size}" -le 102400 ]; then
             smoke_diag

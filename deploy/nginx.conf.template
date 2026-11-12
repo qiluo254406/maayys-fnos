@@ -149,9 +149,10 @@ http {
             # 判断结果不变，行为与改动前完全一致。
             #
             # 两条匹配串在 bundle 里各只出现 1 次；上游改版后若消失，
-            # sub_filter 会**静默失效**（不报错）。验证：
-            #   curl -s http://nas:12701/assets/index-*.js | grep -c 'window.location.port===String'
-            # 期望输出 2。
+            # sub_filter 会**静默失效**（不报错）。验证时数「出现次数」而不是行数 ——
+            # minified 后两处可能压在同一行，grep -c 会给出 1：
+            #   curl -s http://nas:12701/assets/index-*.js | grep -o 'window.location.port===String' | wc -l
+            # 期望输出 2（deploy/build.sh 的冒烟会断言这一条，不通过就让构建失败）。
             sub_filter 'if(xs>0){'     'if(xs>0&&window.location.port===String(xs)){';
             sub_filter 'if(Na&&Na>0){' 'if(Na&&Na>0&&window.location.port===String(Na)){';
         }
