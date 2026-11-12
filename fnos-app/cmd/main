@@ -27,6 +27,8 @@ CONTAINER="maayys-fnos"
 
 # 容器资源上限：4GB 机器上 WebKit 失控会把宿主拖死。
 # --memory 2g：够 MXU + Xvfb + nginx 用；超了只杀容器内进程，宿主还能进应用中心停它。
+# --memory-swap 与 --memory 取同一个值 = 禁用额外 swap：宁可让容器被 OOM 杀掉，
+#   也不要用 swap 把整机拖进长时间抖动（不写这一项时 Docker 默认允许 2×，软上限其实是 4g）。
 # --shm-size 256m：WebKitGTK 默认 64MB 会崩，256MB 足够，不必占掉半个 GB。
 CONTAINER_MEMORY="2g"
 CONTAINER_SHM="256m"
@@ -289,23 +291,31 @@ container_port_matches() {
 }
 
 # docker run 的 "2g" / "256m" 落到 HostConfig 里是字节数，这里换算成同一个量纲再比。
+# 先归一成小写：写成 "2G" 时 `${1%g}` 匹配不上，会静默落到 `*)` 分支导致「每次都判不匹配」。
 size_to_bytes() {
-    case "$1" in
-        *g) echo "$(( ${1%g} * 1073741824 ))" ;;
-        *m) echo "$(( ${1%m} * 1048576 ))" ;;
-        *)  echo "$1" ;;
+    local v
+    v="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    case "${v}" in
+        *g) echo "$(( ${v%g} * 1073741824 ))" ;;
+        *m) echo "$(( ${v%m} * 1048576 ))" ;;
+        *)  echo "${v}" ;;
     esac
 }
 
 # 资源上限同样属于「运行参数」：只比镜像 ID 会漏掉「镜像没变、参数变了」的情况
 # （1.0.3 的端口映射就是这类坑），装完新包却还跑着旧上限。
 container_resource_matches() {
-    local have_mem have_shm
+    local have_mem have_swap have_shm
     have_mem="$(docker inspect --format '{{.HostConfig.Memory}}' "${CONTAINER}" 2>/dev/null)"
+    have_swap="$(docker inspect --format '{{.HostConfig.MemorySwap}}' "${CONTAINER}" 2>/dev/null)"
     have_shm="$(docker inspect --format '{{.HostConfig.ShmSize}}' "${CONTAINER}" 2>/dev/null)"
     [ -n "${have_mem}" ] || return 1
+    [ -n "${have_swap}" ] || return 1
     [ -n "${have_shm}" ] || return 1
     [ "${have_mem}" = "$(size_to_bytes "${CONTAINER_MEMORY}")" ] || return 1
+    # 没写 --memory-swap 时 Docker 会把 MemorySwap 记成 2×Memory，所以要单独比这一项，
+    # 否则老容器（上限 4g）永远不会被判定成「参数变了」。
+    [ "${have_swap}" = "$(size_to_bytes "${CONTAINER_MEMORY}")" ] || return 1
     [ "${have_shm}" = "$(size_to_bytes "${CONTAINER_SHM}")" ] || return 1
     return 0
 }
@@ -317,6 +327,10 @@ gc_unused_image() {
     id="$(printf '%s' "$1" | tr -d '[:space:]')"
     [ -n "${id}" ] || return 0
     if expected_id_matches "${id}"; then
+        return 0
+    fi
+    # 可能已被前面的 docker rmi 顺手删掉了：直接返回，别再去撞一次必然失败的 rmi 记 WARN。
+    if ! docker image inspect "${id}" >/dev/null 2>&1; then
         return 0
     fi
     refs="$(docker ps -aq --filter "ancestor=${id}" 2>/dev/null)" || return 0
@@ -424,7 +438,7 @@ start_process() {
     # --init：tini 当 1 号进程，回收 adb/sh 这类被遗弃的子进程，并且把 SIGTERM
     #         正确转发给 entrypoint（优雅停机的链路从这里开始）。
     # --shm-size：WebKitGTK 默认 64MB /dev/shm 会崩，256MB 够用（512MB 在 4GB 机器上太奢侈）。
-    # --memory：给容器设上限，WebKit 失控时只杀容器内进程，不会把宿主拖进 OOM。
+    # --memory / --memory-swap：硬上限且不留额外 swap，WebKit 失控时只杀容器内进程。
     # --restart unless-stopped：容器异常退出自愈；显式 docker stop 不会被拉起。
     # MXU 的设备列表只列「已连接」的 adb 设备、不扫描网段，容器启动时按这个列表自动 connect。
     # 留空则读 /data/adb-targets.txt，再没有就用网桥网关的 5555。
@@ -435,6 +449,7 @@ start_process() {
         --restart unless-stopped \
         --init \
         --memory "${CONTAINER_MEMORY}" \
+        --memory-swap "${CONTAINER_MEMORY}" \
         --shm-size "${CONTAINER_SHM}" \
         --log-opt max-size=10m \
         --log-opt max-file=3 \

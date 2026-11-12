@@ -47,6 +47,10 @@ gc_unused_image() {
     if id_matches "${id}"; then
         return 0
     fi
+    # 可能已被前面的 docker rmi -f 顺手删掉了：直接返回，别再去撞一次必然失败的 rmi 记 WARN。
+    if ! docker image inspect "${id}" >/dev/null 2>&1; then
+        return 0
+    fi
     refs="$(docker ps -aq --filter "ancestor=${id}" 2>/dev/null)"
     if [ -n "${refs}" ]; then
         log_msg "旧镜像 ${id} 仍被容器引用，保留（容器重建后由 cmd/main 回收）。"
