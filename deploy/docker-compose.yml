@@ -14,8 +14,10 @@ services:
       context: ${MAAYYS_BUILD_WORK:-../build-work}
       dockerfile: Dockerfile
       args:
-        MAAYYS_TARBALL: ${MAAYYS_TARBALL:-MaaYYs-linux-x86_64-v3.17.11-MXU.tar.gz}
-        MAAYYS_VERSION: ${MAAYYS_VERSION:-v3.17.11}
+        # 默认值只是个占位：build-work 里的包名必须与之对应。
+        # 上游发版后这两行会过期，正式部署请显式传 MAAYYS_TARBALL / MAAYYS_VERSION。
+        MAAYYS_TARBALL: ${MAAYYS_TARBALL:-MaaYYs-linux-x86_64-v4.0.9-MXU.tar.gz}
+        MAAYYS_VERSION: ${MAAYYS_VERSION:-v4.0.9}
     image: maayys-fnos:local
     container_name: maayys-fnos
     restart: unless-stopped

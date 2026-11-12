@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # 一条命令构建 MaaYYs 的飞牛 fpk
 #
-#   bash deploy/build.sh                      # 默认：下载 v3.17.11 → 建镜像 → 冒烟 → 导出 → 打 fpk
-#   bash deploy/build.sh --version v3.18.0    # 换上游版本
+#   bash deploy/build.sh                      # 默认：查上游最新 release 并构建（要能访问 api.github.com，国内挂代理）
+#   bash deploy/build.sh --version v4.0.9     # 固定上游版本（可复现，也能配合 --offline）
 #   bash deploy/build.sh --mxu-version v2.8.1        # 用官方 MXU 覆盖上游自带的那个
 #   bash deploy/build.sh --maafw-version v5.15.0     # 用官方 MaaFramework 覆盖上游自带的
-#   bash deploy/build.sh --offline            # 复用构建目录里已下好的包
+#   bash deploy/build.sh --offline            # 复用构建目录里已下好的包（需配合 --version <tag>）
 #   bash deploy/build.sh --no-smoke           # 跳过冒烟测试
 #   bash deploy/build.sh --image-only         # 只建镜像，不打 fpk
 #
 # 前置：Docker（构建机）、curl、gzip、tar。fnpack 会自动下载。
-# 磁盘：约 8GB（上游包 254MB + 镜像 ~2.8GB + 导出包 1.3GB + fpk 1.3GB）
+# 磁盘：约 8GB（上游包 254MB + 镜像 ~1.6GB + 导出包 ~1.6GB + fpk ~540MB，另计构建缓存）
 # 大头在 MaaYYs 自身：全量包解压后约 1.5GB（资源图多），再叠加 WebKitGTK/字体/LLVM。
 #
 # 不要在日用的飞牛上跑构建：吃 CPU/IO，且 docker build 期间镜像层会把存储撑满。
@@ -20,7 +20,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 UPSTREAM_REPO="TanyaShue/MaaYYs"
-UPSTREAM_VERSION="v3.17.11"      # 本项目核对过的版本；换版本前先确认目录结构没变
+UPSTREAM_VERSION="latest"        # 默认跟随上游最新 release；要可复现就显式传 --version <tag>
 # 上游把 MXU / MaaFramework 的版本锁在自己的 CI 里（MXU 还是 TanyaShue/MXU 这个 fork），
 # 想跟上 MaaXYZ 官方仓库时用这两个开关单独覆盖，留空则沿用上游全量包内的版本。
 MXU_VERSION=""
