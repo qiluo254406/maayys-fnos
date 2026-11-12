@@ -6,8 +6,8 @@
 | | |
 |---|---|
 | **项目地址** | https://github.com/qiluo254406/maayys-fnos |
-| **安装包** | [Releases](https://github.com/qiluo254406/maayys-fnos/releases)（584MB，内置离线镜像，装时不联网） |
-| **上游版本** | MaaYYs v3.17.11（随上游更新，见 [更新](#更新)） |
+| **安装包** | [Releases](https://github.com/qiluo254406/maayys-fnos/releases)（约 540MB，内置离线镜像，装时不联网） |
+| **上游版本** | 跟随上游最新 Release（最近一次成功构建为 v4.0.9，见 [更新](#更新)） |
 | **平台** | 飞牛 fnOS 1.1.3100+ / x86_64 / 需要 Docker |
 
 ## 写在前面：这个项目是 AI 写的
@@ -111,7 +111,7 @@ MaaYYs / MaaFramework / MXU 各自遵循其原许可证，使用前请自行阅�
    git clone <this-repo> && cd maayys-fnos
    bash deploy/build.sh
    ```
-   产物在 `dist/maayys-fnos_1.0.5_v3.17.11.fpk`（**584MB**，内置离线镜像，安装时不用联网）。
+   产物在 `dist/maayys-fnos_<应用版本>_<上游版本>.fpk`（**约 540MB**，内置离线镜像，安装时不用联网）。
    也可以完全跳过本地构建，直接用 CI 出的包。
 2. 飞牛 **应用中心 → 左下角手动安装 → 从电脑上传**，选这个 fpk。
 3. 装完在应用中心启动，点桌面 **MAAYYs** 图标 —— 会在浏览器里打开 `http://<NAS>:12701/`。
@@ -135,7 +135,7 @@ MaaYYs / MaaFramework / MXU 各自遵循其原许可证，使用前请自行阅�
 
 ### 体积是怎么构成的（想再瘦看这里）
 
-清理前是镜像 3.0GB / 安装包 1.3GB，现在是 **1.62GB / 584MB**（1.0.9 换字体后再降约 85MB）。去掉的是几块纯浪费：
+清理前是镜像 3.0GB / 安装包 1.3GB，现在是 **1.62GB / 约 540MB**（1.0.9 换字体后再降约 85MB）。去掉的是几块纯浪费：
 
 | 项 | 之前 | 处理 |
 |---|---|---|
@@ -198,7 +198,7 @@ https_proxy=http://127.0.0.1:7890 bash tools/check-update.sh
 bash deploy/build.sh --version latest
 ```
 
-产物落在 `dist/`，文件名自带版本（`maayys-fnos_1.0.5_v3.17.11.fpk`），不会覆盖旧的。
+产物落在 `dist/`，文件名自带版本（形如 `maayys-fnos_1.0.10_v4.0.9.fpk`），不会覆盖旧的。
 
 装到 NAS：应用中心 → 手动安装 → 选新 fpk，**覆盖安装**即可。容器首次启动时
 `seed_app()` 会比对 `/opt/maayys-dist/.dist-version`：变了就刷新程序文件
@@ -212,7 +212,7 @@ bash deploy/build.sh --version latest
 1. **必须**升 `fnos-app/manifest` 里的 `version`，并在 `changelog` 加一句。
    走 CI 的话，发布时会自动 +1 并把结果回写仓库；本地手打则要自己升。
    否则 fnOS 认为版本没变，不给覆盖安装。
-2. 重打：`bash deploy/build.sh --version v3.17.11`（复用已下好的上游包）。
+2. 重打：`bash deploy/build.sh --version v4.0.9`（复用已下好的上游包）。
 
 > 一个坑记在这：如果本次只改了**运行参数**（端口映射、挂载、env）而镜像内容没变，
 > 镜像 ID 会和上一版一模一样。`cmd/main` 现在除了比对镜像 ID，还会比对端口映射
