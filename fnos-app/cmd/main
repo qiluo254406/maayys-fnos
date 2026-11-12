@@ -282,6 +282,27 @@ container_port_matches() {
     printf '%s\n' "${have}" | grep -q ":${HOST_PORT}$"
 }
 
+# 升级回收：容器重建之后，旧镜像只剩悬挂 ID。rmi 在容器运行中无效（只能摘 tag），
+# 所以只在这个时点、只对「没有任何容器引用」的旧 ID 动手；失败只记日志，不影响启动。
+gc_unused_image() {
+    local id refs
+    id="$(printf '%s' "$1" | tr -d '[:space:]')"
+    [ -n "${id}" ] || return 0
+    if expected_id_matches "${id}"; then
+        return 0
+    fi
+    refs="$(docker ps -aq --filter "ancestor=${id}" 2>/dev/null)" || return 0
+    if [ -n "${refs}" ]; then
+        log_msg "旧镜像 ${id} 仍被容器引用，保留。"
+        return 0
+    fi
+    if docker rmi "${id}" >> "${LOG_FILE}" 2>&1; then
+        log_msg "已回收旧镜像 ${id}。"
+    else
+        log_msg "WARN: 回收旧镜像 ${id} 失败，跳过。"
+    fi
+}
+
 container_uptime() {
     local started secs
     started="$(docker inspect --format '{{.State.StartedAt}}' "${CONTAINER}" 2>/dev/null)" || return 1
@@ -333,6 +354,9 @@ status() {
 start_process() {
     check_docker || return 1
     ensure_image || return 1
+
+    # 记下容器现在挂的镜像 ID：重建之后它就是「旧镜像」，用来回收（铁律 9：运行中删不掉）
+    OLD_IMAGE_ID="$(docker inspect --format '{{.Image}}' "${CONTAINER}" 2>/dev/null | tr -d '[:space:]')"
 
     if status_container; then
         if container_image_matches && container_port_matches; then
@@ -397,6 +421,7 @@ start_process() {
     sleep 3
     if status_container; then
         log_msg "Container started: ${CONTAINER} (gateway socket: ${GATEWAY_SOCKET})"
+        gc_unused_image "${OLD_IMAGE_ID}"
         return 0
     fi
 

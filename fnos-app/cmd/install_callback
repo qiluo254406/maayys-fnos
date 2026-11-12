@@ -37,6 +37,28 @@ id_matches() {
     return 1
 }
 
+# 回收升级前的旧镜像：load 之后 tag 已被新镜像接管，旧镜像只剩悬挂 ID。
+# 容器还在跑时 rmi 对它无效（只能摘 tag、删不掉，返回非 0），所以这里只在
+# 「没有任何容器引用」时删；删不掉就留给 cmd/main 在容器重建之后回收。
+gc_unused_image() {
+    local id refs
+    id="$(printf '%s' "$1" | tr -d '[:space:]')"
+    [ -n "${id}" ] || return 0
+    if id_matches "${id}"; then
+        return 0
+    fi
+    refs="$(docker ps -aq --filter "ancestor=${id}" 2>/dev/null)"
+    if [ -n "${refs}" ]; then
+        log_msg "旧镜像 ${id} 仍被容器引用，保留（容器重建后由 cmd/main 回收）。"
+        return 0
+    fi
+    if docker rmi "${id}" >> "${LOG_FILE}" 2>&1; then
+        log_msg "已回收旧镜像 ${id}。"
+    else
+        log_msg "WARN: 回收旧镜像 ${id} 失败，跳过。"
+    fi
+}
+
 log_msg "install_callback started. APPDEST=${TRIM_APPDEST}"
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -88,6 +110,7 @@ if docker load -i "${TMP_TAR}" >> "${LOG_FILE}" 2>&1; then
     else
         log_msg "WARN: loaded image id ${AFTER_ID} does not match expected $(printf '%s' "${EXPECT_IDS}" | tr '\n' ' ')."
     fi
+    gc_unused_image "${CUR_ID}"
 else
     write_user_error "镜像导入失败，请查看日志 ${LOG_FILE}"
 fi
