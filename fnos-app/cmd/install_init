@@ -23,7 +23,12 @@ fi
 
 # 安装峰值约 5.4GB，预留到 6GB；目标路径不可用时不能误查系统根卷。
 MIN_FREE_KB=6291456
+# install_init 阶段 TRIM_APPDEST 目录可能还没被创建，直接判断 [ -e ] 会永远走警告分支、
+# 等于这条检查不存在。逐级上溯到最近一个存在的祖先目录（通常就是存储卷根），再量空间。
 TARGET_PATH="${TRIM_APPDEST:-}"
+while [ -n "${TARGET_PATH}" ] && [ "${TARGET_PATH}" != "/" ] && [ ! -e "${TARGET_PATH}" ]; do
+    TARGET_PATH="$(dirname "${TARGET_PATH}")"
+done
 if [ -z "${TARGET_PATH}" ] || [ ! -e "${TARGET_PATH}" ]; then
     echo "警告：无法确定目标存储卷，跳过 6GB 剩余空间检查。" >&2
     exit 0
