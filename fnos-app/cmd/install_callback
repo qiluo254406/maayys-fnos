@@ -92,17 +92,31 @@ if [ -n "${CUR_ID}" ]; then
     docker rmi -f "${IMAGE}" >> "${LOG_FILE}" 2>&1 || true
 fi
 
-log_msg "Decompressing ${TAR_GZ} -> ${TMP_TAR} ..."
-# gunzip 对「流完好、尾部多几个字节」的包返回 2，但解出的 tar 完整可用 —— 校验产物
-gunzip -c "${TAR_GZ}" > "${TMP_TAR}" 2>> "${LOG_FILE}" || true
-if [ ! -s "${TMP_TAR}" ] || ! tar -tf "${TMP_TAR}" manifest.json >/dev/null 2>&1; then
+load_image() {
+    # build.sh 产出的是 `docker save | gzip`，docker load 能直接读 gzip 流，
+    # 不必先解出 1.3GB 的临时 tar（安装峰值磁盘因此少占 1.3GB）。
+    if docker load -i "${TAR_GZ}" >> "${LOG_FILE}" 2>&1; then
+        return 0
+    fi
+
+    # 兜底：个别老 daemon 不认压缩流。gunzip 对「流完好、尾部多几个字节」返回 2，
+    # 但产物可用 —— 校验 tar -tf，不看返回码。
+    log_msg "Direct load failed, retrying after decompressing to ${TMP_TAR} ..."
+    gunzip -c "${TAR_GZ}" > "${TMP_TAR}" 2>> "${LOG_FILE}" || true
+    if [ ! -s "${TMP_TAR}" ] || ! tar -tf "${TMP_TAR}" manifest.json >/dev/null 2>&1; then
+        rm -f "${TMP_TAR}"
+        return 1
+    fi
+    if docker load -i "${TMP_TAR}" >> "${LOG_FILE}" 2>&1; then
+        rm -f "${TMP_TAR}"
+        return 0
+    fi
     rm -f "${TMP_TAR}"
-    write_user_error "镜像解压失败，请查看日志 ${LOG_FILE}"
-    exit 0
-fi
+    return 1
+}
 
 log_msg "Loading image (可能几分钟) ..."
-if docker load -i "${TMP_TAR}" >> "${LOG_FILE}" 2>&1; then
+if load_image; then
     log_msg "Image loaded successfully."
     AFTER_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE}" 2>/dev/null | tr -d '[:space:]')"
     if [ -n "${AFTER_ID}" ] && id_matches "${AFTER_ID}"; then
@@ -114,7 +128,5 @@ if docker load -i "${TMP_TAR}" >> "${LOG_FILE}" 2>&1; then
 else
     write_user_error "镜像导入失败，请查看日志 ${LOG_FILE}"
 fi
-
-rm -f "${TMP_TAR}"
 
 exit 0
