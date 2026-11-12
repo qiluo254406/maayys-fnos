@@ -124,7 +124,9 @@ jobs:
           for i, ln in enumerate(lines):
               if ln.startswith("changelog"):
                   old = ln.split("=", 1)[1].strip()
-                  lines[i] = f"changelog             = {new}: 由 CI 按上游 {up} 自动构建。 {old}"
+                  entries = [item.strip() for item in re.split(r"(?=\d+\.\d+\.\d+: )", old) if item.strip()]
+                  entries.insert(0, f"{new}: 由 CI 按上游 {up} 自动构建。")
+                  lines[i] = "changelog             = " + " ".join(entries[:3])
                   break
           open(p, "w", encoding="utf-8").write("\n".join(lines) + "\n")
           print(f"changelog 已更新（{new}）")
