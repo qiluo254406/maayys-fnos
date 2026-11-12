@@ -2,4 +2,42 @@
 
 ### This script is called before the user installs the application.
 
+# 与其他 cmd 脚本一致：错误文案交给飞牛展示，脚本本身以 0 退出。
+fail() {
+    echo "$1" > "${TRIM_TEMP_LOGFILE}"
+    exit 0
+}
+
+if ! command -v docker >/dev/null 2>&1; then
+    fail "未找到 docker，请先在应用中心安装 Docker。"
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    fail "Docker 服务未运行，请先启动 Docker。"
+fi
+
+ARCH="$(docker info --format '{{.Architecture}}' 2>/dev/null)"
+if [ "${ARCH}" != "x86_64" ]; then
+    fail "当前 Docker 架构为 ${ARCH:-未知}，MaaYYs 仅支持 x86_64。"
+fi
+
+# 安装峰值约 5.4GB，预留到 6GB；目标路径不可用时不能误查系统根卷。
+MIN_FREE_KB=6291456
+TARGET_PATH="${TRIM_APPDEST:-}"
+if [ -z "${TARGET_PATH}" ] || [ ! -e "${TARGET_PATH}" ]; then
+    echo "警告：无法确定目标存储卷，跳过 6GB 剩余空间检查。" >&2
+    exit 0
+fi
+
+AVAILABLE_KB="$(df -Pk "${TARGET_PATH}" 2>/dev/null | awk 'NR == 2 {print $4}')"
+case "${AVAILABLE_KB}" in
+    ''|*[!0-9]*)
+        echo "警告：无法读取目标存储剩余空间，跳过 6GB 空间检查。" >&2
+        exit 0
+        ;;
+esac
+if [ "${AVAILABLE_KB}" -lt "${MIN_FREE_KB}" ]; then
+    fail "目标存储剩余空间不足 6GB，请释放空间后重试。"
+fi
+
 exit 0
