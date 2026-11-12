@@ -225,6 +225,28 @@ jobs:
           draft: false
           prerelease: false
 
+      # 版本号必须持久化到仓库：只改工作区的话，下次构建会再产出同一个版本号 ——
+      # fnOS 拒绝同版本覆盖安装，NAS 上的自动更新脚本按 app_version 比对也感知不到新包。
+      # 用 GITHUB_TOKEN 提交的 push 本身不会触发新工作流（GitHub 防递归），[skip ci] 再兜一层。
+      - name: 回写版本号到仓库
+        if: steps.gate.outputs.skip == 'false'
+        run: |
+          set -eu
+          if git diff --quiet -- fnos-app/manifest; then
+            echo "manifest 没有变化，跳过回写"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add fnos-app/manifest
+          git commit -m "chore: 版本号回写 ${APP_VER} [skip ci]"
+          # 回写失败不该把已经发布成功的构建标红（例如远端刚好被别处推过）
+          if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+            echo "已回写版本号：${APP_VER}"
+          else
+            echo "::warning::版本号回写失败，请手动 bump fnos-app/manifest"
+          fi
+
       # 构建挂了不能只靠红叉：开/更 issue，GitHub 会给你发邮件通知
       - name: 失败时开 issue 提醒
         if: failure()
