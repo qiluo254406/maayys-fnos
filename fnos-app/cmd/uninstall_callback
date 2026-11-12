@@ -2,4 +2,35 @@
 
 ### This script is called after the user uninstalls the application.
 
+LOG_FILE="${TRIM_PKGVAR}/uninstall.log"
+IMAGE="maayys-fnos:local"
+
+log_msg() {
+    mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+log_msg "uninstall_callback started."
+
+# 只清理镜像；查询引用失败时宁可保留，也不能误删或阻断卸载。
+if ! command -v docker >/dev/null 2>&1; then
+    log_msg "WARN: 未找到 docker，跳过镜像清理。"
+    exit 0
+fi
+
+if ! CONTAINERS="$(docker ps -a --filter "ancestor=${IMAGE}" --format '{{.Names}}' 2>> "${LOG_FILE}")"; then
+    log_msg "WARN: 无法确认 ${IMAGE} 的容器引用，保留镜像。"
+    exit 0
+fi
+if [ -n "${CONTAINERS}" ]; then
+    log_msg "镜像 ${IMAGE} 仍被容器引用，保留：$(printf '%s' "${CONTAINERS}" | tr '\n' ' ')"
+    exit 0
+fi
+
+if docker rmi "${IMAGE}" >> "${LOG_FILE}" 2>&1; then
+    log_msg "已删除镜像 ${IMAGE}。"
+else
+    log_msg "WARN: 删除镜像 ${IMAGE} 失败，继续完成卸载。"
+fi
+
 exit 0
