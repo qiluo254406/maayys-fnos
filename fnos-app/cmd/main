@@ -25,6 +25,12 @@ CONTAINER_HTTP_PORT="18000"
 IMAGE="maayys-fnos:local"
 CONTAINER="maayys-fnos"
 
+# 容器资源上限：4GB 机器上 WebKit 失控会把宿主拖死。
+# --memory 2g：够 MXU + Xvfb + nginx 用；超了只杀容器内进程，宿主还能进应用中心停它。
+# --shm-size 256m：WebKitGTK 默认 64MB 会崩，256MB 足够，不必占掉半个 GB。
+CONTAINER_MEMORY="2g"
+CONTAINER_SHM="256m"
+
 # 应用层不再走飞牛统一网关（原因见上面 HOST_PORT 那段）：图标直接打开
 # http://<NAS>:12701/，浏览器与 MXU 同源，WebSocket 原生可用。
 #
@@ -282,6 +288,28 @@ container_port_matches() {
     printf '%s\n' "${have}" | grep -q ":${HOST_PORT}$"
 }
 
+# docker run 的 "2g" / "256m" 落到 HostConfig 里是字节数，这里换算成同一个量纲再比。
+size_to_bytes() {
+    case "$1" in
+        *g) echo "$(( ${1%g} * 1073741824 ))" ;;
+        *m) echo "$(( ${1%m} * 1048576 ))" ;;
+        *)  echo "$1" ;;
+    esac
+}
+
+# 资源上限同样属于「运行参数」：只比镜像 ID 会漏掉「镜像没变、参数变了」的情况
+# （1.0.3 的端口映射就是这类坑），装完新包却还跑着旧上限。
+container_resource_matches() {
+    local have_mem have_shm
+    have_mem="$(docker inspect --format '{{.HostConfig.Memory}}' "${CONTAINER}" 2>/dev/null)"
+    have_shm="$(docker inspect --format '{{.HostConfig.ShmSize}}' "${CONTAINER}" 2>/dev/null)"
+    [ -n "${have_mem}" ] || return 1
+    [ -n "${have_shm}" ] || return 1
+    [ "${have_mem}" = "$(size_to_bytes "${CONTAINER_MEMORY}")" ] || return 1
+    [ "${have_shm}" = "$(size_to_bytes "${CONTAINER_SHM}")" ] || return 1
+    return 0
+}
+
 # 升级回收：容器重建之后，旧镜像只剩悬挂 ID。rmi 在容器运行中无效（只能摘 tag），
 # 所以只在这个时点、只对「没有任何容器引用」的旧 ID 动手；失败只记日志，不影响启动。
 gc_unused_image() {
@@ -359,12 +387,12 @@ start_process() {
     OLD_IMAGE_ID="$(docker inspect --format '{{.Image}}' "${CONTAINER}" 2>/dev/null | tr -d '[:space:]')"
 
     if status_container; then
-        if container_image_matches && container_port_matches; then
-            log_msg "Container already running (image + port mapping ok)."
+        if container_image_matches && container_port_matches && container_resource_matches; then
+            log_msg "Container already running (image + port mapping + limits ok)."
             return 0
         fi
-        # 镜像或端口映射与包里的期望不一致：拆掉重建
-        log_msg "Container config differs from package (image/port) -> recreating with ${IMAGE}."
+        # 镜像、端口映射或资源上限与包里的期望不一致：拆掉重建
+        log_msg "Container config differs from package (image/port/limits) -> recreating with ${IMAGE}."
         docker stop --time "${DOCKER_STOP_TIMEOUT}" "${CONTAINER}" >> "${LOG_FILE}" 2>&1 || true
         docker rm -f "${CONTAINER}" >> "${LOG_FILE}" 2>&1 || true
     fi
@@ -395,7 +423,8 @@ start_process() {
     log_msg "Starting container ${CONTAINER} ..."
     # --init：tini 当 1 号进程，回收 adb/sh 这类被遗弃的子进程，并且把 SIGTERM
     #         正确转发给 entrypoint（优雅停机的链路从这里开始）。
-    # --shm-size：WebKitGTK 默认 64MB /dev/shm 会崩。
+    # --shm-size：WebKitGTK 默认 64MB /dev/shm 会崩，256MB 够用（512MB 在 4GB 机器上太奢侈）。
+    # --memory：给容器设上限，WebKit 失控时只杀容器内进程，不会把宿主拖进 OOM。
     # --restart unless-stopped：容器异常退出自愈；显式 docker stop 不会被拉起。
     # MXU 的设备列表只列「已连接」的 adb 设备、不扫描网段，容器启动时按这个列表自动 connect。
     # 留空则读 /data/adb-targets.txt，再没有就用网桥网关的 5555。
@@ -405,7 +434,8 @@ start_process() {
     docker run -d --name "${CONTAINER}" \
         --restart unless-stopped \
         --init \
-        --shm-size 512m \
+        --memory "${CONTAINER_MEMORY}" \
+        --shm-size "${CONTAINER_SHM}" \
         --log-opt max-size=10m \
         --log-opt max-file=3 \
         -p "${HOST_PORT}:${CONTAINER_HTTP_PORT}" \
