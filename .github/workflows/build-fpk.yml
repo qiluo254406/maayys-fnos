@@ -125,7 +125,15 @@ jobs:
               if ln.startswith("changelog"):
                   old = ln.split("=", 1)[1].strip()
                   entries = [item.strip() for item in re.split(r"(?=\d+\.\d+\.\d+: )", old) if item.strip()]
-                  entries.insert(0, f"{new}: 由 CI 按上游 {up} 自动构建。")
+                  # manifest 里常提前写好下一版的说明（与本次自增的版本号撞号）。直接置顶会出现
+                  # 两条同版本记录，直接丢掉又会让手写的说明消失 —— 所以合并成一条：CI 说明 + 原正文。
+                  dup = re.compile(rf"^{re.escape(new)}\s*:\s*")
+                  manual = [dup.sub("", e).strip() for e in entries if dup.match(e)]
+                  entries = [e for e in entries if not dup.match(e)]
+                  head = f"{new}: 由 CI 按上游 {up} 自动构建。"
+                  if manual and manual[0]:
+                      head = f"{head} {manual[0]}"
+                  entries.insert(0, head)
                   lines[i] = "changelog             = " + " ".join(entries[:3])
                   break
           open(p, "w", encoding="utf-8").write("\n".join(lines) + "\n")
